@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+gantt-state.json
+*.log
+.DS_Store
+.tsbuildinfo
