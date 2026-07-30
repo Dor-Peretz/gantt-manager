@@ -55,6 +55,8 @@ export function buildRows(milestones: Milestone[]): RowLayout[] {
   for (const m of milestones) {
     rows.push({ kind: "milestone", milestone: m, rowIndex: i, y: HEAD_H + i * ROW_H });
     i++;
+    // Local milestones are a single top-level star row — never expand children.
+    if (m.localOnly) continue;
     if (!m.collapsed) {
       for (const t of m.tasks) {
         // Epic self-schedule is shown on the milestone row, not nested under it.

@@ -30,6 +30,12 @@ export interface GanttTask {
   jiraUpdated: string;
   /** Show as a zero-duration milestone marker (red star) instead of a bar. */
   isMarker?: boolean;
+  /** Created in the app only — never Pull/Push to Jira. */
+  localOnly?: boolean;
+  /** Draft task created in the app — Push will create it in Jira under createEpicId. */
+  pendingCreate?: boolean;
+  /** Epic key to parent under when pendingCreate is true */
+  createEpicId?: string;
   /** True when start/duration differ from last pull and need Push */
   scheduleDirty?: boolean;
   /** True when a status transition is pending Push */
@@ -44,12 +50,34 @@ export interface StatusTransition {
   to: { id: string; name: string };
 }
 
+/** Local-only timeline milestone — stored in preferences, never synced to Jira. */
+export interface LocalMarker {
+  id: string;
+  title: string;
+  /** Date shown on the timeline (YYYY-MM-DD) */
+  start: string;
+  /** @deprecated Was used when markers lived under epics; ignored now. */
+  epicId?: string;
+}
+
+/** Draft task awaiting Push → Jira create. */
+export interface DraftTask {
+  id: string;
+  epicId: string;
+  title: string;
+  start: string | null;
+  due: string | null;
+  durationDays: number;
+}
+
 export interface Milestone {
   id: string;
   title: string;
   color: string;
   collapsed: boolean;
   tasks: GanttTask[];
+  /** Local-only milestone row (red star) — not a Jira epic, never synced. */
+  localOnly?: boolean;
 }
 
 export interface GanttModel {
@@ -82,6 +110,10 @@ export interface LocalState {
   milestoneOrder: string[];
   /** issueKey -> shown as a milestone marker (red star) */
   markers: Record<string, boolean>;
+  /** Local-only milestone markers (never synced to Jira) */
+  localMarkers: LocalMarker[];
+  /** Draft tasks to create in Jira on Push */
+  draftTasks: DraftTask[];
   projectStart: string;
   showHolidays: boolean;
   showDeps: boolean;
@@ -101,6 +133,12 @@ export interface PushItem {
   /** When set, Push will transition the issue to this status */
   transitionId?: string | null;
   status?: string | null;
+  /** When set, create a new Jira issue instead of updating an existing one */
+  create?: {
+    epicKey: string;
+    summary: string;
+    draftId: string;
+  };
 }
 
 export interface PushResult {
@@ -108,6 +146,10 @@ export interface PushResult {
   status: "ok" | "conflict" | "error" | "skipped";
   message?: string;
   jiraUpdated?: string;
+  /** Original draft id when a create succeeded */
+  draftId?: string;
+  /** New Jira key when a create succeeded */
+  createdKey?: string;
 }
 
 /** Distinct palette for Jira assignees (task bars + resource rows). */

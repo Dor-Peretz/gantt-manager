@@ -530,16 +530,102 @@ export async function getTransitions(issueKey: string): Promise<JiraTransition[]
   }));
 }
 
+function projectKeyFromIssueKey(issueKey: string): string {
+  const i = issueKey.lastIndexOf("-");
+  return i > 0 ? issueKey.slice(0, i) : issueKey;
+}
+
+async function createIssueInJira(
+  item: PushItem,
+  fieldMap: FieldMap,
+): Promise<PushResult> {
+  const create = item.create!;
+  const projectKey = projectKeyFromIssueKey(create.epicKey);
+  const issueTypes = ["Story", "Task"];
+  let lastError = "create failed";
+
+  for (const typeName of issueTypes) {
+    // Prefer parent (next-gen / hierarchy); fall back to Epic Link (classic).
+    const attempts: Array<Record<string, unknown>> = [
+      {
+        project: { key: projectKey },
+        summary: create.summary,
+        issuetype: { name: typeName },
+        parent: { key: create.epicKey },
+        [fieldMap.startDate]: item.start,
+        duedate: item.due,
+      },
+      {
+        project: { key: projectKey },
+        summary: create.summary,
+        issuetype: { name: typeName },
+        [fieldMap.epicLink]: create.epicKey,
+        [fieldMap.startDate]: item.start,
+        duedate: item.due,
+      },
+    ];
+
+    for (const fields of attempts) {
+      const res = await jiraFetch("/rest/api/3/issue", {
+        method: "POST",
+        body: JSON.stringify({ fields }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { key?: string };
+        const createdKey = data.key || "";
+        if (!createdKey) {
+          return {
+            key: create.draftId,
+            draftId: create.draftId,
+            status: "error",
+            message: "create succeeded but no key returned",
+          };
+        }
+        const afterRes = await jiraFetch(
+          `/rest/api/3/issue/${encodeURIComponent(createdKey)}?fields=updated`,
+        );
+        let jiraUpdated = "";
+        if (afterRes.ok) {
+          const after = (await afterRes.json()) as { fields: { updated: string } };
+          jiraUpdated = after.fields.updated;
+        }
+        return {
+          key: createdKey,
+          draftId: create.draftId,
+          createdKey,
+          status: "ok",
+          jiraUpdated,
+          message: `Created ${createdKey} under ${create.epicKey}`,
+        };
+      }
+      lastError = `create failed (${res.status}): ${(await res.text()).slice(0, 400)}`;
+      // Try next shape / issue type
+    }
+  }
+
+  return {
+    key: create.draftId,
+    draftId: create.draftId,
+    status: "error",
+    message: lastError,
+  };
+}
+
 export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
   const fieldMap = await discoverFields();
   const results: PushResult[] = [];
 
   for (const item of items) {
-    if (!item.key) {
+    if (!item.key && !item.create) {
       results.push({ key: "?", status: "skipped", message: "missing key" });
       continue;
     }
     try {
+      if (item.create) {
+        results.push(await createIssueInJira(item, fieldMap));
+        continue;
+      }
+
       // Optimistic lock: re-fetch updated
       const getRes = await jiraFetch(
         `/rest/api/3/issue/${encodeURIComponent(item.key)}?fields=updated,status`,
@@ -617,7 +703,8 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
       results.push({ key: item.key, status: "ok", jiraUpdated });
     } catch (err) {
       results.push({
-        key: item.key,
+        key: item.key || item.create?.draftId || "?",
+        draftId: item.create?.draftId,
         status: "error",
         message: err instanceof Error ? err.message : String(err),
       });

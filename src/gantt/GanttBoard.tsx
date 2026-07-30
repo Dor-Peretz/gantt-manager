@@ -117,6 +117,8 @@ interface Props {
     place: "before" | "after",
   ) => void;
   onToggleMarker: (taskId: string) => void;
+  onDeleteLocalMilestone: (taskId: string) => void;
+  onDeleteDraftTask: (taskId: string) => void;
   onLayoutChange: (patch: Partial<GanttModel>) => void;
   onScrollChange?: (scroll: ScrollState) => void;
 }
@@ -151,6 +153,8 @@ export function GanttBoard({
   onReorderMilestone,
   onReorderTask,
   onToggleMarker,
+  onDeleteLocalMilestone,
+  onDeleteDraftTask,
   onLayoutChange,
   onScrollChange,
 }: Props) {
@@ -467,6 +471,7 @@ export function GanttBoard({
           {/* Body rows */}
           {rows.map((r) => {
             if (r.kind === "milestone") {
+              const isLocalMs = !!r.milestone.localOnly;
               const epicSelf = r.milestone.tasks.find((t) =>
                 isEpicSelfTask(r.milestone.id, t),
               );
@@ -475,30 +480,36 @@ export function GanttBoard({
               ).length;
               const span = milestoneSpan(r.milestone, holidaysOn);
               // Use calendar-day bar for multi-task milestone summary; workday bar for epic self.
-              const msGeo = epicSelf?.start
-                ? barGeometry(
-                    days,
-                    epicSelf.start,
-                    epicSelf.durationDays,
-                    holidaysOn,
-                    dayWidth,
-                  )
-                : span
-                  ? (() => {
-                      const si = days.findIndex((d) => d.ymd === span.start);
-                      const ei = days.findIndex((d) => d.ymd === span.end);
-                      if (si < 0 || ei < 0) return null;
-                      return {
-                        left: si * dayWidth,
-                        width: Math.max(dayWidth, (ei - si + 1) * dayWidth),
-                      };
-                    })()
+              const msGeo =
+                !isLocalMs && epicSelf?.start
+                  ? barGeometry(
+                      days,
+                      epicSelf.start,
+                      epicSelf.durationDays,
+                      holidaysOn,
+                      dayWidth,
+                    )
+                  : !isLocalMs && span
+                    ? (() => {
+                        const si = days.findIndex((d) => d.ymd === span.start);
+                        const ei = days.findIndex((d) => d.ymd === span.end);
+                        if (si < 0 || ei < 0) return null;
+                        return {
+                          left: si * dayWidth,
+                          width: Math.max(dayWidth, (ei - si + 1) * dayWidth),
+                        };
+                      })()
+                    : null;
+              const localDate = epicSelf?.start || epicSelf?.due || null;
+              const localStarLeft =
+                isLocalMs && localDate
+                  ? markerLeft(days, localDate, dayWidth)
                   : null;
               return (
                 <div
-                  className={`pg-row milestone${epicSelf?.dirty ? " dirty" : ""}${
-                    msDrag === r.milestone.id ? " row-dragging" : ""
-                  }${
+                  className={`pg-row milestone${isLocalMs ? " local-ms" : ""}${
+                    epicSelf?.dirty ? " dirty" : ""
+                  }${msDrag === r.milestone.id ? " row-dragging" : ""}${
                     msDropTarget?.id === r.milestone.id
                       ? ` drop-${msDropTarget.place}`
                       : ""
@@ -534,8 +545,8 @@ export function GanttBoard({
                       <span
                         className="pg-drag-handle"
                         draggable
-                        title="Drag to reorder epic"
-                        aria-label="Drag to reorder epic"
+                        title={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
+                        aria-label={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
                         onDragStart={(e) => {
                           setMsDrag(r.milestone.id);
                           e.dataTransfer.effectAllowed = "move";
@@ -548,13 +559,15 @@ export function GanttBoard({
                       >
                         ⠿
                       </span>
-                      <span className="pg-col-num-id">{childCount}</span>
+                      <span className="pg-col-num-id">{isLocalMs ? "★" : childCount}</span>
                       {epicSelf?.dirty ? (
                         <span className="pg-dirty-dot" title="Unpushed change" />
                       ) : null}
                     </div>
                     <div className="pg-col-name">
-                      {childCount > 0 ? (
+                      {isLocalMs ? (
+                        <span className="pg-toggle pg-toggle-spacer" />
+                      ) : childCount > 0 ? (
                         <button
                           type="button"
                           className="pg-toggle"
@@ -566,36 +579,91 @@ export function GanttBoard({
                       ) : (
                         <span className="pg-toggle pg-toggle-spacer" />
                       )}
-                      <EpicColorPicker
-                        epicKey={r.milestone.id}
-                        color={r.milestone.color}
-                        onChange={(color) =>
-                          onMilestoneColorChange(r.milestone.id, color)
-                        }
-                      />
+                      {isLocalMs ? (
+                        <span className="pg-local-ms-bullet" title="Local milestone">
+                          ★
+                        </span>
+                      ) : (
+                        <EpicColorPicker
+                          epicKey={r.milestone.id}
+                          color={r.milestone.color}
+                          onChange={(color) =>
+                            onMilestoneColorChange(r.milestone.id, color)
+                          }
+                        />
+                      )}
                       <div className="pg-name-stack">
                         <span className="pg-name-text" style={{ fontWeight: 700 }}>
-                          <a
-                            href={`${jiraBaseUrl}/browse/${r.milestone.id}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {r.milestone.id}
-                          </a>
+                          {isLocalMs ? (
+                            <span className="pg-local-key">MS</span>
+                          ) : (
+                            <a
+                              href={`${jiraBaseUrl}/browse/${r.milestone.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {r.milestone.id}
+                            </a>
+                          )}
                           {r.milestone.title}
                         </span>
-                        {epicSelf && (
-                          <span className="pg-owner">
-                            {epicSelf.assignee ? `${epicSelf.assignee} · ` : ""}
-                            {epicSelf.estDays != null ? `Est ${epicSelf.estDays}sp` : ""}
-                            {epicSelf.owner && epicSelf.owner !== "—"
-                              ? `${epicSelf.estDays != null ? " · " : ""}${epicSelf.owner}`
+                        <span className="pg-owner">
+                          {isLocalMs
+                            ? "Local milestone · not synced to Jira"
+                            : epicSelf
+                              ? `${epicSelf.assignee ? `${epicSelf.assignee} · ` : ""}${
+                                  epicSelf.estDays != null ? `Est ${epicSelf.estDays}sp` : ""
+                                }${
+                                  epicSelf.owner && epicSelf.owner !== "—"
+                                    ? `${epicSelf.estDays != null ? " · " : ""}${epicSelf.owner}`
+                                    : ""
+                                }`
                               : ""}
-                          </span>
-                        )}
+                        </span>
                       </div>
+                      {isLocalMs && (
+                        <button
+                          type="button"
+                          className="pg-local-delete"
+                          title="Delete milestone"
+                          aria-label="Delete milestone"
+                          onClick={() => onDeleteLocalMilestone(r.milestone.id)}
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
-                    {epicSelf ? (
+                    {isLocalMs && epicSelf ? (
+                      <>
+                        <div className="pg-col-start">
+                          <input
+                            className="pg-input"
+                            type="date"
+                            value={epicSelf.start || ""}
+                            onChange={(e) => {
+                              const startVal = e.target.value || null;
+                              onScheduleEdit(epicSelf.id, {
+                                start: startVal,
+                                due: startVal,
+                              });
+                            }}
+                          />
+                        </div>
+                        <div className="pg-col-dur">
+                          <span className="pg-dur-milestone" title="Milestone (no duration)">
+                            ★
+                          </span>
+                        </div>
+                        <div className="pg-col-status">
+                          <span className="pg-status-pill local">Local</span>
+                        </div>
+                        <div className="pg-col-res">
+                          <span className="pg-assign-empty" title="Local milestone">
+                            ★
+                          </span>
+                        </div>
+                      </>
+                    ) : epicSelf ? (
                       <>
                         <div className="pg-col-start">
                           <input
@@ -667,7 +735,31 @@ export function GanttBoard({
                       projStartLeft={projStartLeft}
                       projEndLeft={projEndLeft}
                     />
-                    {msGeo && (
+                    {isLocalMs && localStarLeft != null && epicSelf ? (
+                      <div
+                        className={`pg-milestone-star${
+                          drag?.taskId === epicSelf.id ? " dragging" : ""
+                        }`}
+                        style={{ left: localStarLeft }}
+                        title={`Milestone: ${localDate}`}
+                        onPointerDown={(e) => {
+                          if (!epicSelf.start) return;
+                          beginDrag(
+                            {
+                              kind: "move",
+                              taskId: epicSelf.id,
+                              startX: e.clientX,
+                              origStart: epicSelf.start,
+                              durationDays: 1,
+                              lastStart: epicSelf.start,
+                            },
+                            e,
+                          );
+                        }}
+                      >
+                        ★
+                      </div>
+                    ) : msGeo ? (
                       <div
                         className={`pg-bar milestone-bar${
                           epicSelf && drag?.taskId === epicSelf.id
@@ -727,7 +819,7 @@ export function GanttBoard({
                           </>
                         )}
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               );
@@ -801,37 +893,72 @@ export function GanttBoard({
                     />
                     <div className="pg-name-stack">
                       <span className="pg-name-text">
-                        <a
-                          href={`${jiraBaseUrl}/browse/${t.id}`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {t.id}
-                        </a>
+                        {t.localOnly ? (
+                          <span className="pg-local-key" title="Local milestone">
+                            ★ MS
+                          </span>
+                        ) : t.pendingCreate ? (
+                          <span className="pg-draft-key" title="Draft — Push to create in Jira">
+                            NEW
+                          </span>
+                        ) : (
+                          <a
+                            href={`${jiraBaseUrl}/browse/${t.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {t.id}
+                          </a>
+                        )}
                         {t.title}
                       </span>
                       <span className="pg-owner">
-                        {t.assignee ? `${t.assignee} · ` : ""}
-                        {t.owner}
+                        {t.localOnly
+                          ? "Local only · not synced to Jira"
+                          : t.pendingCreate
+                            ? `Draft · will create under ${t.createEpicId || "epic"} on Push`
+                            : `${t.assignee ? `${t.assignee} · ` : ""}${t.owner}`}
                       </span>
-                      {t.blockedBy.length > 0 && (
+                      {!t.localOnly && !t.pendingCreate && t.blockedBy.length > 0 && (
                         <span className="pg-prereq-hint">{t.blockedBy.join(", ")}</span>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      className={`pg-marker-toggle${t.isMarker ? " on" : ""}`}
-                      title={
-                        t.isMarker
-                          ? "Milestone marker — click to make it a normal bar"
-                          : "Mark as milestone (red star, no duration)"
-                      }
-                      aria-label="Toggle milestone marker"
-                      aria-pressed={!!t.isMarker}
-                      onClick={() => onToggleMarker(t.id)}
-                    >
-                      {t.isMarker ? "★" : "☆"}
-                    </button>
+                    {t.localOnly ? (
+                      <button
+                        type="button"
+                        className="pg-local-delete"
+                        title="Delete local milestone"
+                        aria-label="Delete local milestone"
+                        onClick={() => onDeleteLocalMilestone(t.id)}
+                      >
+                        ×
+                      </button>
+                    ) : t.pendingCreate ? (
+                      <button
+                        type="button"
+                        className="pg-local-delete"
+                        title="Delete draft task"
+                        aria-label="Delete draft task"
+                        onClick={() => onDeleteDraftTask(t.id)}
+                      >
+                        ×
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={`pg-marker-toggle${t.isMarker ? " on" : ""}`}
+                        title={
+                          t.isMarker
+                            ? "Milestone marker — click to make it a normal bar"
+                            : "Mark as milestone (red star, no duration)"
+                        }
+                        aria-label="Toggle milestone marker"
+                        aria-pressed={!!t.isMarker}
+                        onClick={() => onToggleMarker(t.id)}
+                      >
+                        {t.isMarker ? "★" : "☆"}
+                      </button>
+                    )}
                   </div>
                   <div className="pg-col-start">
                     <input
@@ -848,7 +975,7 @@ export function GanttBoard({
                     />
                   </div>
                   <div className="pg-col-dur">
-                    {t.isMarker ? (
+                    {t.isMarker || t.localOnly ? (
                       <span className="pg-dur-milestone" title="Milestone (no duration)">
                         ★
                       </span>
@@ -872,16 +999,32 @@ export function GanttBoard({
                     )}
                   </div>
                   <div className="pg-col-status">
-                    <StatusSelect
-                      issueKey={t.id}
-                      status={t.status}
-                      pulledStatus={t.pulledStatus || t.status}
-                      transitionId={t.transitionId}
-                      onChange={(next) => onStatusEdit(t.id, next)}
-                    />
+                    {t.localOnly ? (
+                      <span className="pg-status-pill local" title="Local only — not in Jira">
+                        Local
+                      </span>
+                    ) : t.pendingCreate ? (
+                      <span className="pg-status-pill draft" title="Draft — Push to create in Jira">
+                        Draft
+                      </span>
+                    ) : (
+                      <StatusSelect
+                        issueKey={t.id}
+                        status={t.status}
+                        pulledStatus={t.pulledStatus || t.status}
+                        transitionId={t.transitionId}
+                        onChange={(next) => onStatusEdit(t.id, next)}
+                      />
+                    )}
                   </div>
                   <div className="pg-col-res">
-                    <AssignMenu resources={model.resources} selected={t.resourceIds} />
+                    {t.localOnly ? (
+                      <span className="pg-assign-empty" title="Local milestone">
+                        ★
+                      </span>
+                    ) : (
+                      <AssignMenu resources={model.resources} selected={t.resourceIds} />
+                    )}
                   </div>
                 </div>
                 <div className="pg-track" style={{ width: trackW, minHeight: ROW_H }}>

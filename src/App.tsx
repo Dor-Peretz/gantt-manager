@@ -10,8 +10,30 @@ import {
   type ScrollState,
 } from "./api";
 import { BrandLockup } from "./brand/BrandMark";
+import { AddMilestoneDialog } from "./gantt/AddMilestoneDialog";
+import { AddTaskDialog } from "./gantt/AddTaskDialog";
 import { GanttBoard } from "./gantt/GanttBoard";
-import type { GanttModel, GanttTask, LocalState, PushResult, ThemeMode } from "./lib/types";
+import {
+  collectDraftTasks,
+  draftToTask,
+  injectDraftTasks,
+  newDraftTaskId,
+} from "./lib/draftTasks";
+import {
+  collectLocalMarkers,
+  injectLocalMarkers,
+  localMarkerToMilestone,
+  newLocalMarkerId,
+} from "./lib/localMarkers";
+import type {
+  DraftTask,
+  GanttModel,
+  GanttTask,
+  LocalMarker,
+  LocalState,
+  PushResult,
+  ThemeMode,
+} from "./lib/types";
 import { emptyModel } from "./lib/types";
 import { dueFromStartDuration } from "./lib/workdays";
 
@@ -21,7 +43,8 @@ function applyTheme(theme: ThemeMode) {
 
 function countDirty(m: GanttModel): number {
   let n = 0;
-  for (const ms of m.milestones) for (const t of ms.tasks) if (t.dirty) n++;
+  for (const ms of m.milestones)
+    for (const t of ms.tasks) if (t.dirty && !t.localOnly) n++;
   return n;
 }
 
@@ -36,6 +59,7 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
     milestoneColors[m.id] = m.color;
     taskOrder[m.id] = m.tasks.map((t) => t.id);
     for (const t of m.tasks) {
+      if (t.localOnly) continue;
       allocations[t.id] = t.resourceIds;
       if (t.isMarker) markers[t.id] = true;
     }
@@ -47,6 +71,8 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
     taskOrder,
     milestoneOrder: next.milestones.map((m) => m.id),
     markers,
+    localMarkers: collectLocalMarkers(next),
+    draftTasks: collectDraftTasks(next),
     milestoneColors,
     projectStart: next.projectStart,
     showHolidays: next.showHolidays,
@@ -63,9 +89,9 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
   const dirtyById = new Map<string, GanttTask>();
   const prevById = new Map(previous.milestones.map((m) => [m.id, m]));
   for (const m of previous.milestones) {
-    for (const t of m.tasks) if (t.dirty) dirtyById.set(t.id, t);
+    for (const t of m.tasks) if (t.dirty && !t.localOnly) dirtyById.set(t.id, t);
   }
-  return {
+  const merged: GanttModel = {
     ...fresh,
     milestones: fresh.milestones.map((m) => {
       const prev = prevById.get(m.id);
@@ -96,6 +122,14 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
       };
     }),
   };
+  const orderHint = previous.milestones.map((m) => m.id);
+  let withLocals = injectLocalMarkers(
+    merged,
+    collectLocalMarkers(previous),
+    orderHint,
+  );
+  withLocals = injectDraftTasks(withLocals, collectDraftTasks(previous));
+  return withLocals;
 }
 
 export default function App() {
@@ -143,7 +177,15 @@ export default function App() {
   }, []);
 
   const runPull = useCallback(
-    async (jqlValue: string, opts?: { silent?: boolean; previous?: GanttModel }) => {
+    async (
+      jqlValue: string,
+      opts?: {
+        silent?: boolean;
+        previous?: GanttModel;
+        localMarkers?: LocalMarker[];
+        draftTasks?: DraftTask[];
+      },
+    ) => {
       const q = jqlValue.trim();
       if (!q) return;
       setBusy("pull");
@@ -153,16 +195,31 @@ export default function App() {
       try {
         let next = await pullGantt(q);
         if (opts?.previous) next = mergeDirtySchedule(next, opts.previous);
+        else {
+          if (opts?.localMarkers?.length) {
+            next = injectLocalMarkers(
+              next,
+              opts.localMarkers,
+              opts.localMarkers.map((m) => m.id),
+            );
+          }
+          if (opts?.draftTasks?.length) {
+            next = injectDraftTasks(next, opts.draftTasks);
+          }
+        }
         setModel(next);
         setJql(next.jql);
         await persistLocal(prefsFromModel(next, next.jql));
         persistCache(next, scrollRef.current);
         const count = next.milestones.reduce((n, m) => n + m.tasks.length, 0);
+        const locals = collectLocalMarkers(next).length;
         const dirty = countDirty(next);
         setStatus(
           dirty
             ? `Pulled ${count} tasks · kept ${dirty} local edit(s)`
-            : `Pulled ${count} tasks · ${next.milestones.length} epics`,
+            : `Pulled ${count} tasks · ${next.milestones.length} epics${
+                locals ? ` · ${locals} local milestone(s)` : ""
+              }`,
         );
         setHint(`Last pull ${new Date(next.pulledAt || Date.now()).toLocaleString()}`);
       } catch (err) {
@@ -207,6 +264,16 @@ export default function App() {
             resourcesDockHeight:
               prefs?.resourcesDockHeight || cache.model.resourcesDockHeight || 220,
           };
+          if (prefs?.localMarkers?.length) {
+            restored = injectLocalMarkers(
+              restored,
+              prefs.localMarkers,
+              prefs.milestoneOrder,
+            );
+          }
+          if (prefs?.draftTasks?.length) {
+            restored = injectDraftTasks(restored, prefs.draftTasks);
+          }
           setModel(restored);
           if (cache.scroll) setScroll(cache.scroll);
           const count = restored.milestones.reduce((n, m) => n + m.tasks.length, 0);
@@ -244,7 +311,12 @@ export default function App() {
             );
           } else {
             setHint(`Connected: ${h.site} · refreshing from Jira…`);
-            await runPull(savedJql, { silent: true, previous: restored || undefined });
+            await runPull(savedJql, {
+              silent: true,
+              previous: restored || undefined,
+              localMarkers: prefs?.localMarkers,
+              draftTasks: prefs?.draftTasks,
+            });
           }
         } else {
           setHint(`Connected: ${h.site} · enter JQL and Pull`);
@@ -258,9 +330,13 @@ export default function App() {
 
   const dirtyTasks = useMemo(() => {
     const out: GanttTask[] = [];
-    for (const m of model.milestones) for (const t of m.tasks) if (t.dirty) out.push(t);
+    for (const m of model.milestones)
+      for (const t of m.tasks) if (t.dirty && !t.localOnly) out.push(t);
     return out;
   }, [model.milestones]);
+
+  const [addMsOpen, setAddMsOpen] = useState(false);
+  const [addTaskOpen, setAddTaskOpen] = useState(false);
 
   function toggleTheme() {
     const next: ThemeMode = theme === "dark" ? "light" : "dark";
@@ -298,7 +374,12 @@ export default function App() {
     if (!dirtyTasks.length) return;
     setBusy("push");
     setError(null);
-    setStatus(`Pushing ${dirtyTasks.length} task(s)…`);
+    const creates = dirtyTasks.filter((t) => t.pendingCreate).length;
+    setStatus(
+      creates
+        ? `Pushing ${dirtyTasks.length} item(s) · ${creates} create…`
+        : `Pushing ${dirtyTasks.length} task(s)…`,
+    );
     try {
       const { results } = await pushGantt(
         dirtyTasks.map((t) => ({
@@ -306,8 +387,15 @@ export default function App() {
           start: t.start,
           due: t.due,
           jiraUpdated: t.jiraUpdated,
-          transitionId: t.transitionId || null,
+          transitionId: t.pendingCreate ? null : t.transitionId || null,
           status: t.status,
+          create: t.pendingCreate
+            ? {
+                epicKey: t.createEpicId || "",
+                summary: t.title,
+                draftId: t.id,
+              }
+            : undefined,
         })),
       );
       setPushResults(results);
@@ -316,11 +404,18 @@ export default function App() {
         milestones: prev.milestones.map((m) => ({
           ...m,
           tasks: m.tasks.map((t) => {
-            const r = results.find((x) => x.key === t.id);
+            const r =
+              results.find((x) => x.draftId === t.id) ||
+              results.find((x) => x.key === t.id);
             if (!r) return t;
             if (r.status === "ok") {
+              const newKey = r.createdKey || r.key;
               return {
                 ...t,
+                id: newKey,
+                friendlyId: t.friendlyId === "NEW" ? newKey : t.friendlyId,
+                pendingCreate: false,
+                createEpicId: undefined,
                 dirty: false,
                 scheduleDirty: false,
                 statusDirty: false,
@@ -334,9 +429,12 @@ export default function App() {
         })),
       }));
       const ok = results.filter((r) => r.status === "ok").length;
+      const created = results.filter((r) => r.status === "ok" && r.createdKey).length;
       const conflicts = results.filter((r) => r.status === "conflict").length;
       const errors = results.filter((r) => r.status === "error").length;
-      setStatus(`Push done · ${ok} ok · ${conflicts} conflict · ${errors} error`);
+      setStatus(
+        `Push done · ${ok} ok${created ? ` (${created} created)` : ""} · ${conflicts} conflict · ${errors} error`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
@@ -347,30 +445,100 @@ export default function App() {
   }
 
   function onScheduleEdit(taskId: string, patch: Partial<GanttTask>) {
+    let wasLocal = false;
     updateModel((prev) => ({
       ...prev,
       milestones: prev.milestones.map((m) => ({
         ...m,
         tasks: m.tasks.map((t) => {
           if (t.id !== taskId) return t;
+          wasLocal = !!t.localOnly;
           const next = {
             ...t,
             ...patch,
-            scheduleDirty: true,
-            dirty: true,
+            // Local milestones never go to Jira — keep them non-dirty.
+            scheduleDirty: t.localOnly ? false : true,
+            dirty: t.localOnly ? false : true,
           };
           if (patch.start !== undefined || patch.durationDays !== undefined) {
-            next.due = dueFromStartDuration(
-              next.start,
-              next.durationDays,
-              prev.showHolidays,
-            );
+            if (t.localOnly || t.isMarker) {
+              const date = next.start || next.due;
+              next.start = date;
+              next.due = date;
+              next.durationDays = 1;
+            } else {
+              next.due = dueFromStartDuration(
+                next.start,
+                next.durationDays,
+                prev.showHolidays,
+              );
+            }
           }
           return next;
         }),
       })),
     }));
-    setStatus("Unsaved schedule changes");
+    setStatus(wasLocal ? "Local milestone updated" : "Unsaved schedule changes");
+  }
+
+  function onAddDraftTask(input: {
+    epicId: string;
+    title: string;
+    start: string;
+    durationDays: number;
+  }) {
+    const due = dueFromStartDuration(input.start, input.durationDays, model.showHolidays);
+    const draft = {
+      id: newDraftTaskId(),
+      epicId: input.epicId,
+      title: input.title,
+      start: input.start,
+      due,
+      durationDays: input.durationDays,
+    };
+    const task = draftToTask(draft);
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) =>
+        m.id === input.epicId
+          ? { ...m, collapsed: false, tasks: [...m.tasks, task] }
+          : m,
+      ),
+    }));
+    setStatus(`Draft task added · Push to create in Jira`);
+  }
+
+  function onDeleteDraftTask(taskId: string) {
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks.filter((t) => t.id !== taskId),
+      })),
+    }));
+    setStatus("Draft task removed");
+  }
+
+  function onAddLocalMilestone(input: { title: string; start: string }) {
+    const marker = {
+      id: newLocalMarkerId(),
+      title: input.title,
+      start: input.start,
+    };
+    const row = localMarkerToMilestone(marker);
+    updateModel((prev) => ({
+      ...prev,
+      milestones: [...prev.milestones, row],
+    }));
+    setStatus(`Milestone added · ${input.title}`);
+  }
+
+  function onDeleteLocalMilestone(milestoneId: string) {
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.filter((m) => m.id !== milestoneId),
+    }));
+    setStatus("Milestone removed");
   }
 
   function onStatusEdit(
@@ -530,9 +698,26 @@ export default function App() {
           className={`gantt-btn${dirtyTasks.length ? " warn" : ""}`}
           disabled={busy !== null || dirtyTasks.length === 0}
           onClick={() => void onPush()}
-          title="Write Start date + Due date to Jira for dirty tasks"
+          title="Create draft tasks in Jira and write Start/Due/status for dirty items"
         >
           {busy === "push" ? "Pushing…" : `Push${dirtyTasks.length ? ` (${dirtyTasks.length})` : ""}`}
+        </button>
+        <button
+          type="button"
+          className="gantt-btn"
+          disabled={!model.milestones.length}
+          onClick={() => setAddTaskOpen(true)}
+          title="Add a draft task under an epic — Push creates it in Jira"
+        >
+          + Task
+        </button>
+        <button
+          type="button"
+          className="gantt-btn"
+          onClick={() => setAddMsOpen(true)}
+          title="Add a top-level milestone (red star) — not synced to Jira"
+        >
+          + Milestone
         </button>
         <label className="pg-field">
           Project start
@@ -598,11 +783,28 @@ export default function App() {
         onReorderMilestone={onReorderMilestone}
         onReorderTask={onReorderTask}
         onToggleMarker={onToggleMarker}
+        onDeleteLocalMilestone={onDeleteLocalMilestone}
+        onDeleteDraftTask={onDeleteDraftTask}
         onLayoutChange={(patch) => updateModel((prev) => ({ ...prev, ...patch }))}
         onScrollChange={(next) => {
           setScroll(next);
           persistCache(modelRef.current, next);
         }}
+      />
+
+      <AddTaskDialog
+        open={addTaskOpen}
+        epics={model.milestones.filter((m) => !m.localOnly)}
+        defaultDate={model.projectStart}
+        onClose={() => setAddTaskOpen(false)}
+        onAdd={onAddDraftTask}
+      />
+
+      <AddMilestoneDialog
+        open={addMsOpen}
+        defaultDate={model.projectStart}
+        onClose={() => setAddMsOpen(false)}
+        onAdd={onAddLocalMilestone}
       />
 
       <div className="pg-legend">
