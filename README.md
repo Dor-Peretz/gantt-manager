@@ -1,6 +1,21 @@
 # Gantt Manager
 
-Local Jira-backed Gantt planner. **Jira is the source of truth** for tasks; the app pulls issues via JQL, lets you plan Start / Duration / Status on a TeamGantt-style chart (Sun–Thu work week, IL holidays, prerequisites, resource hours), then **Push** writes **Start date**, **Due date**, and **status transitions** back to Jira.
+Local Jira-backed Gantt planner. **Jira is the source of truth** for issues; the app pulls via JQL, lets you plan on a TeamGantt-style chart, then **Push** writes schedule and status changes back to Jira.
+
+Stack: React + Vite (UI) · Express + TypeScript (API)
+
+## Features
+
+- **Pull by JQL** — Epics → milestone rows; stories/tasks → schedule bars
+- **Childless epics** — Use the epic’s own Start date, Due date, and Story Points when it has no children
+- **Timeline** — Month labels, day-of-month + weekday letters; drag bars to move, drag the right edge to resize
+- **Work calendar** — Sun–Thu work week; optional Israeli public holidays
+- **Prerequisites** — Jira “Blocks” links as dependency arrows (read-only)
+- **Status** — Change status in-app; Push applies the matching Jira transition
+- **Resources** — Assignees from Jira; hours dock pinned at the bottom
+- **Epic colors** — Click the epic color dot to pick a palette/custom color (saved locally)
+- **Theme** — Light / dark toggle
+- **Session restore** — Last view + scroll cached; prefs autosaved
 
 ## Setup
 
@@ -15,11 +30,13 @@ Fill in `.env`:
 |----------|-------------|
 | `JIRA_BASE_URL` | e.g. `https://sunbit.atlassian.net` |
 | `JIRA_EMAIL` | Your Atlassian account email |
-| `JIRA_API_TOKEN` | [API token](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `JIRA_API_TOKEN` | [Create an API token](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `JIRA_JQL` | Default JQL for Pull (editable in the toolbar) |
 | `PORT` | Backend port (default `8787`) |
 
-Token needs **read:jira-work** and **write:jira-work** (create/update issues for Start date + Due date).
+The token needs permission to **read** and **write** Jira issues (Start date, Due date, transitions).
+
+Never commit `.env`.
 
 ## Run
 
@@ -27,8 +44,10 @@ Token needs **read:jira-work** and **write:jira-work** (create/update issues for
 npm run dev
 ```
 
-- UI: http://localhost:5173 (Vite, proxies `/api` → backend)
-- API: http://localhost:8787
+| | URL |
+|--|-----|
+| UI | http://localhost:5173 (Vite proxies `/api` → backend) |
+| API | http://localhost:8787 |
 
 Production-style:
 
@@ -41,40 +60,72 @@ Then open http://localhost:8787.
 
 ## Usage
 
-1. Enter JQL (or use the default), e.g. `project = SBT AND parent = SBT-61018 ORDER BY rank ASC`.
-2. Click **Pull** — epics become milestone rows; stories/tasks become schedule rows.
-3. Edit Start / Duration (or drag/resize bars). Dirty tasks show an amber marker.
-4. Click **Push** — writes Start date (`customfield_10907`) and Due date for dirty tasks only. Conflicts (issue updated in Jira since pull) are skipped; re-Pull to reconcile.
-5. Assign people in the Resources pane — stored locally in `gantt-state.json` (not pushed to Jira).
+1. Enter JQL (or use the default), e.g.
+
+   ```
+   (key = SBT-61016 OR issuekey in portfolioChildIssuesOf(SBT-61016)) AND status != Canceled ORDER BY summary ASC
+   ```
+
+2. Click **Pull** — epics become milestones; stories become tasks. Empty epics still appear and use their own dates/estimates.
+3. Plan the schedule:
+   - Edit **Start** / **Duration** in the left columns, or **drag / resize** bars on the timeline
+   - Change **Status** via the status control (pending until Push)
+   - Click an epic’s **color dot** to change its milestone color
+4. Dirty rows show an amber marker. Click **Push** to write Start date, Due date, and status transitions for dirty items only.
+5. Conflicts (issue updated in Jira since Pull) are skipped — re-**Pull** to reconcile.
 
 ## Field mapping
 
 | Gantt | Jira |
 |-------|------|
-| Milestone | Parent Epic |
-| Task | Story / Task |
+| Milestone | Epic (parent) |
+| Task | Story / Task (or the epic itself when it has no children) |
 | Friendly id | Summary prefix `[M1-T1] …` |
 | Start | Start date (`customfield_10907`, auto-discovered) |
 | Due / Duration | Due date ↔ working days (Sun–Thu, ± IL holidays) |
-| Prerequisites | “Blocks” issue links (is blocked by) — read-only |
-| Assignee / Team | Display only |
+| Estimate | Story Points (shown on empty epics; used when dates are incomplete) |
+| Prerequisites | “Blocks” issue links (blocked by) — read-only |
+| Status | Issue status; Push via transitions |
+| Assignee | Display + resource hours (not reassigned via Push) |
 
-## Preferences file
+## Preferences & cache
 
-`preferences.json` (git-ignored, created automatically) stores your local prefs:
+### `preferences.json` (git-ignored)
 
-- `jql` — autosaved as you type in the toolbar
+Created automatically. Stores:
+
+- `jql` — autosaved as you type
 - `projectStart`, `showHolidays`, `showDeps`
-- layout: `leftPanelWidth`, `resourcesDockHeight`, `dayWidthPx` (drag the panel edges to resize)
-- `theme` — `"light"` | `"dark"` (toolbar toggle)
-- assignee colors / allocations, collapsed epics
+- Layout: `leftPanelWidth`, `resourcesDockHeight`, `dayWidthPx`
+- `theme` — `"light"` \| `"dark"`
+- `milestoneColors` — epic key → color
+- Assignee colors / allocations, collapsed epics
 
-Copy [`preferences.example.json`](preferences.example.json) if you want a starter file. On first run, an older `gantt-state.json` is migrated to `preferences.json`.
+Copy [`preferences.example.json`](preferences.example.json) for a starter. An older `gantt-state.json` is migrated to `preferences.json` on first run.
 
-### Session restore
+### `gantt-cache.json` (git-ignored)
 
-`gantt-cache.json` (git-ignored) stores the last Gantt snapshot + scroll position. On refresh the app:
+Last Gantt snapshot + scroll. On refresh the app:
 
 1. Restores the cached view immediately
 2. Auto-Pulls from Jira when credentials work and JQL is set
-3. Skips auto-Pull if you have unpushed schedule edits (so you don’t lose them) — Push or Pull manually
+3. Skips auto-Pull if you have unpushed edits — Push or Pull manually
+
+## Project layout
+
+```
+server/          Express API (pull, push, state, cache, transitions)
+src/gantt/       Gantt board, timeline, resources, color/status UI
+src/lib/         Types + workday calendar
+preferences.json Local prefs (ignored)
+gantt-cache.json Session snapshot (ignored)
+```
+
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | API + Vite together |
+| `npm run build` | Typecheck + production UI build |
+| `npm start` | Serve API + built UI |
+| `npm run preview` | Vite preview of the built UI |
