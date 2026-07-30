@@ -8,6 +8,9 @@
   "resourcesDockHeight": 220,
   "theme": "light",
   "collapsed": {},
+  "taskOrder": {},
+  "milestoneOrder": [],
+  "markers": {},
   "milestoneColors": {},
   "resources": [],
   "allocations": {}

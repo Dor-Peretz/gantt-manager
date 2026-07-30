@@ -29,15 +29,24 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
   const allocations: Record<string, string[]> = {};
   const collapsed: Record<string, boolean> = {};
   const milestoneColors: Record<string, string> = {};
+  const taskOrder: Record<string, string[]> = {};
+  const markers: Record<string, boolean> = {};
   for (const m of next.milestones) {
     collapsed[m.id] = !!m.collapsed;
     milestoneColors[m.id] = m.color;
-    for (const t of m.tasks) allocations[t.id] = t.resourceIds;
+    taskOrder[m.id] = m.tasks.map((t) => t.id);
+    for (const t of m.tasks) {
+      allocations[t.id] = t.resourceIds;
+      if (t.isMarker) markers[t.id] = true;
+    }
   }
   return {
     resources: next.resources,
     allocations,
     collapsed,
+    taskOrder,
+    milestoneOrder: next.milestones.map((m) => m.id),
+    markers,
     milestoneColors,
     projectStart: next.projectStart,
     showHolidays: next.showHolidays,
@@ -65,10 +74,13 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
         collapsed: prev?.collapsed ?? m.collapsed,
         color: prev?.color ?? m.color,
         tasks: m.tasks.map((t) => {
+          const prevTask = prev?.tasks.find((p) => p.id === t.id);
+          const isMarker = prevTask?.isMarker ?? t.isMarker;
           const d = dirtyById.get(t.id);
-          if (!d) return t;
+          if (!d) return { ...t, isMarker };
           return {
             ...t,
+            isMarker,
             start: d.scheduleDirty ? d.start : t.start,
             due: d.scheduleDirty ? d.due : t.due,
             durationDays: d.scheduleDirty ? d.durationDays : t.durationDays,
@@ -398,6 +410,63 @@ export default function App() {
     }));
   }
 
+  function onReorderTask(
+    milestoneId: string,
+    fromId: string,
+    toId: string,
+    place: "before" | "after",
+  ) {
+    if (fromId === toId) return;
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) => {
+        if (m.id !== milestoneId) return m;
+        const tasks = [...m.tasks];
+        const fromIndex = tasks.findIndex((t) => t.id === fromId);
+        if (fromIndex < 0) return m;
+        const [moved] = tasks.splice(fromIndex, 1);
+        let toIndex = tasks.findIndex((t) => t.id === toId);
+        if (toIndex < 0) toIndex = tasks.length;
+        if (place === "after") toIndex += 1;
+        tasks.splice(toIndex, 0, moved);
+        return { ...m, tasks };
+      }),
+    }));
+    setStatus("Task order updated");
+  }
+
+  function onReorderMilestone(fromId: string, toId: string, place: "before" | "after") {
+    if (fromId === toId) return;
+    updateModel((prev) => {
+      const ms = [...prev.milestones];
+      const fromIndex = ms.findIndex((m) => m.id === fromId);
+      if (fromIndex < 0) return prev;
+      const [moved] = ms.splice(fromIndex, 1);
+      let toIndex = ms.findIndex((m) => m.id === toId);
+      if (toIndex < 0) toIndex = ms.length;
+      if (place === "after") toIndex += 1;
+      ms.splice(toIndex, 0, moved);
+      return { ...prev, milestones: ms };
+    });
+    setStatus("Epic order updated");
+  }
+
+  function onToggleMarker(taskId: string) {
+    let nowMarker = false;
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks.map((t) => {
+          if (t.id !== taskId) return t;
+          nowMarker = !t.isMarker;
+          return { ...t, isMarker: nowMarker };
+        }),
+      })),
+    }));
+    setStatus(nowMarker ? "Marked as milestone" : "Milestone mark removed");
+  }
+
   function onMilestoneColorChange(milestoneId: string, color: string) {
     updateModel((prev) => ({
       ...prev,
@@ -422,6 +491,17 @@ export default function App() {
           >
             {theme === "dark" ? "Light" : "Dark"}
           </button>
+          {health != null && !health.ok && (
+            <a
+              className="gantt-btn token-btn"
+              href="https://id.atlassian.com/manage-profile/security/api-tokens"
+              target="_blank"
+              rel="noreferrer"
+              title="Create a Jira API token, then add it to .env as JIRA_API_TOKEN"
+            >
+              Get Jira token
+            </a>
+          )}
           <span className={`health ${health?.ok ? "ok" : "bad"}`}>
             {health == null ? "…" : health.ok ? "Jira connected" : "Jira offline"}
           </span>
@@ -515,6 +595,9 @@ export default function App() {
         onStatusEdit={onStatusEdit}
         onToggleCollapse={onToggleCollapse}
         onMilestoneColorChange={onMilestoneColorChange}
+        onReorderMilestone={onReorderMilestone}
+        onReorderTask={onReorderTask}
+        onToggleMarker={onToggleMarker}
         onLayoutChange={(patch) => updateModel((prev) => ({ ...prev, ...patch }))}
         onScrollChange={(next) => {
           setScroll(next);

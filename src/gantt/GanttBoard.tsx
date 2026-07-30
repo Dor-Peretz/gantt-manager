@@ -32,7 +32,8 @@ import {
 } from "./timeline";
 import { useDragResize } from "./useDragResize";
 
-const LEFT_MIN = 360;
+/** Min = fixed columns + a readable Name column. */
+const LEFT_MIN = 48 + 108 + 78 + 108 + 100 + 120;
 const LEFT_MAX = 960;
 const RES_DOCK_MIN = 96;
 const RES_DOCK_MAX = 560;
@@ -40,6 +41,62 @@ const DAY_W_MIN = 18;
 const DAY_W_MAX = 48;
 /** # + Start + Dur + Status + Res (name column gets the rest) */
 const LEFT_FIXED_OTHER = 48 + 108 + 78 + 108 + 100;
+
+type Pt = [number, number];
+
+/** Build an SVG path from orthogonal points with rounded corners. */
+function roundedOrthPath(points: Pt[], radius = 6): string {
+  const pts: Pt[] = [];
+  for (const p of points) {
+    const last = pts[pts.length - 1];
+    if (!last || Math.round(last[0]) !== Math.round(p[0]) || Math.round(last[1]) !== Math.round(p[1])) {
+      pts.push(p);
+    }
+  }
+  if (pts.length < 2) return "";
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1];
+    const [cx, cy] = pts[i];
+    const [nx, ny] = pts[i + 1];
+    const len1 = Math.hypot(cx - px, cy - py) || 1;
+    const len2 = Math.hypot(nx - cx, ny - cy) || 1;
+    const r = Math.min(radius, len1 / 2, len2 / 2);
+    const a: Pt = [cx - ((cx - px) / len1) * r, cy - ((cy - py) / len1) * r];
+    const b: Pt = [cx + ((nx - cx) / len2) * r, cy + ((ny - cy) / len2) * r];
+    d += ` L ${a[0]} ${a[1]} Q ${cx} ${cy} ${b[0]} ${b[1]}`;
+  }
+  const last = pts[pts.length - 1];
+  d += ` L ${last[0]} ${last[1]}`;
+  return d;
+}
+
+/** Finish-to-start elbow route: from right edge of predecessor to left edge of successor. */
+function depRoute(x1: number, y1: number, x2: number, y2: number): Pt[] {
+  const stub = 14;
+  const bendX = x2 - stub; // vertical drop just before the target
+  if (bendX >= x1 + stub) {
+    // Forward: run along the source row, then a single drop into the target.
+    return [
+      [x1, y1],
+      [bendX, y1],
+      [bendX, y2],
+      [x2, y2],
+    ];
+  }
+  // Successor starts before predecessor ends: exit right, hug a lane, come back in.
+  const outX = x1 + stub;
+  const inX = x2 - stub;
+  const laneY = y1 + (y2 >= y1 ? 1 : -1) * (ROW_H / 2);
+  return [
+    [x1, y1],
+    [outX, y1],
+    [outX, laneY],
+    [inX, laneY],
+    [inX, y2],
+    [x2, y2],
+  ];
+}
 
 interface Props {
   model: GanttModel;
@@ -52,6 +109,14 @@ interface Props {
   ) => void;
   onToggleCollapse: (milestoneId: string) => void;
   onMilestoneColorChange: (milestoneId: string, color: string) => void;
+  onReorderMilestone: (fromId: string, toId: string, place: "before" | "after") => void;
+  onReorderTask: (
+    milestoneId: string,
+    fromId: string,
+    toId: string,
+    place: "before" | "after",
+  ) => void;
+  onToggleMarker: (taskId: string) => void;
   onLayoutChange: (patch: Partial<GanttModel>) => void;
   onScrollChange?: (scroll: ScrollState) => void;
 }
@@ -83,6 +148,9 @@ export function GanttBoard({
   onStatusEdit,
   onToggleCollapse,
   onMilestoneColorChange,
+  onReorderMilestone,
+  onReorderTask,
+  onToggleMarker,
   onLayoutChange,
   onScrollChange,
 }: Props) {
@@ -170,6 +238,18 @@ export function GanttBoard({
   const projStartLeft = markerLeft(days, model.projectStart, dayWidth);
   const projEnd = projectEndYmd(model.milestones, holidaysOn);
   const projEndLeft = projEnd ? markerLeft(days, projEnd, dayWidth) : null;
+
+  const [rowDrag, setRowDrag] = useState<{ milestoneId: string; taskId: string } | null>(
+    null,
+  );
+  const [rowDropTarget, setRowDropTarget] = useState<
+    { taskId: string; place: "before" | "after" } | null
+  >(null);
+
+  const [msDrag, setMsDrag] = useState<string | null>(null);
+  const [msDropTarget, setMsDropTarget] = useState<
+    { id: string; place: "before" | "after" } | null
+  >(null);
 
   const [drag, setDrag] = useState<DragMode>(null);
   const dragRef = useRef<DragMode>(null);
@@ -268,8 +348,9 @@ export function GanttBoard({
   }
 
   const depPaths = useMemo(() => {
-    if (!model.showDeps) return [] as Array<{ d: string; color: string }>;
-    const paths: Array<{ d: string; color: string }> = [];
+    if (!model.showDeps)
+      return [] as Array<{ d: string; x1: number; y1: number }>;
+    const paths: Array<{ d: string; x1: number; y1: number }> = [];
     const rowY = new Map<string, number>();
     for (const r of rows) {
       if (r.kind === "task" && r.task) rowY.set(r.task.id, r.y + ROW_H / 2);
@@ -289,11 +370,7 @@ export function GanttBoard({
         if (!fromGeo || y1 == null || y2 == null) continue;
         const x1 = fromGeo.left + fromGeo.width;
         const x2 = toGeo.left;
-        const mid = (x1 + x2) / 2;
-        paths.push({
-          d: `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`,
-          color: r.milestone.color,
-        });
+        paths.push({ d: roundedOrthPath(depRoute(x1, y1, x2, y2)), x1, y1 });
       }
     }
     return paths;
@@ -326,6 +403,15 @@ export function GanttBoard({
         style={{ flex: "1 1 auto", minHeight: 120, maxHeight: "none" }}
       >
         <div className="pg-canvas" style={{ minHeight: canvasH }}>
+          {/* Full-height divider to resize the columns panel (drag left/right) */}
+          <div className="pg-left-divider-rail">
+            <div
+              className="pg-resize-x pg-resize-x-full"
+              title="Drag to resize columns"
+              style={{ height: canvasH }}
+              onPointerDown={(e) => leftResize.begin(e, leftW)}
+            />
+          </div>
           {/* Header */}
           <div className="pg-row pg-head">
             <div className="pg-fixed">
@@ -347,11 +433,6 @@ export function GanttBoard({
               <div className="pg-col-res" style={{ fontWeight: 700, color: "var(--muted)", fontSize: 11 }}>
                 Res
               </div>
-              <div
-                className="pg-resize-x"
-                title="Drag to resize left panel"
-                onPointerDown={(e) => leftResize.begin(e, leftW)}
-              />
             </div>
             <div className="pg-track pg-head-track" style={{ width: trackW }}>
               <div className="pg-days" style={{ width: trackW }}>
@@ -415,12 +496,59 @@ export function GanttBoard({
                   : null;
               return (
                 <div
-                  className={`pg-row milestone${epicSelf?.dirty ? " dirty" : ""}`}
+                  className={`pg-row milestone${epicSelf?.dirty ? " dirty" : ""}${
+                    msDrag === r.milestone.id ? " row-dragging" : ""
+                  }${
+                    msDropTarget?.id === r.milestone.id
+                      ? ` drop-${msDropTarget.place}`
+                      : ""
+                  }`}
                   key={`ms-${r.milestone.id}`}
+                  onDragOver={(e) => {
+                    if (!msDrag) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const place: "before" | "after" =
+                      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                    if (
+                      msDropTarget?.id !== r.milestone.id ||
+                      msDropTarget?.place !== place
+                    ) {
+                      setMsDropTarget({ id: r.milestone.id, place });
+                    }
+                  }}
+                  onDrop={(e) => {
+                    if (!msDrag) return;
+                    e.preventDefault();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const place: "before" | "after" =
+                      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                    onReorderMilestone(msDrag, r.milestone.id, place);
+                    setMsDrag(null);
+                    setMsDropTarget(null);
+                  }}
                 >
                   <div className="pg-fixed">
                     <div className="pg-col-num">
-                      {childCount}
+                      <span
+                        className="pg-drag-handle"
+                        draggable
+                        title="Drag to reorder epic"
+                        aria-label="Drag to reorder epic"
+                        onDragStart={(e) => {
+                          setMsDrag(r.milestone.id);
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", r.milestone.id);
+                        }}
+                        onDragEnd={() => {
+                          setMsDrag(null);
+                          setMsDropTarget(null);
+                        }}
+                      >
+                        ⠿
+                      </span>
+                      <span className="pg-col-num-id">{childCount}</span>
                       {epicSelf?.dirty ? (
                         <span className="pg-dirty-dot" title="Unpushed change" />
                       ) : null}
@@ -610,11 +738,60 @@ export function GanttBoard({
               t.start &&
               barGeometry(days, t.start, t.durationDays, holidaysOn, dayWidth);
 
+            const isRowDragging = rowDrag?.taskId === t.id;
+            const dropCls =
+              rowDropTarget?.taskId === t.id && rowDrag?.milestoneId === r.milestone.id
+                ? ` drop-${rowDropTarget.place}`
+                : "";
+
             return (
-              <div className={`pg-row task${t.dirty ? " dirty" : ""}`} key={t.id}>
+              <div
+                className={`pg-row task${t.dirty ? " dirty" : ""}${
+                  isRowDragging ? " row-dragging" : ""
+                }${dropCls}`}
+                key={t.id}
+                onDragOver={(e) => {
+                  if (!rowDrag || rowDrag.milestoneId !== r.milestone.id) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const place: "before" | "after" =
+                    e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                  if (rowDropTarget?.taskId !== t.id || rowDropTarget?.place !== place) {
+                    setRowDropTarget({ taskId: t.id, place });
+                  }
+                }}
+                onDrop={(e) => {
+                  if (!rowDrag || rowDrag.milestoneId !== r.milestone.id) return;
+                  e.preventDefault();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const place: "before" | "after" =
+                    e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                  onReorderTask(r.milestone.id, rowDrag.taskId, t.id, place);
+                  setRowDrag(null);
+                  setRowDropTarget(null);
+                }}
+              >
                 <div className="pg-fixed">
                   <div className="pg-col-num">
-                    {t.friendlyId}
+                    <span
+                      className="pg-drag-handle"
+                      draggable
+                      title="Drag to reorder"
+                      aria-label="Drag to reorder task"
+                      onDragStart={(e) => {
+                        setRowDrag({ milestoneId: r.milestone.id, taskId: t.id });
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", t.id);
+                      }}
+                      onDragEnd={() => {
+                        setRowDrag(null);
+                        setRowDropTarget(null);
+                      }}
+                    >
+                      ⠿
+                    </span>
+                    <span className="pg-col-num-id">{t.friendlyId}</span>
                     {t.dirty ? <span className="pg-dirty-dot" title="Unpushed change" /> : null}
                   </div>
                   <div className="pg-col-name indented">
@@ -641,6 +818,20 @@ export function GanttBoard({
                         <span className="pg-prereq-hint">{t.blockedBy.join(", ")}</span>
                       )}
                     </div>
+                    <button
+                      type="button"
+                      className={`pg-marker-toggle${t.isMarker ? " on" : ""}`}
+                      title={
+                        t.isMarker
+                          ? "Milestone marker — click to make it a normal bar"
+                          : "Mark as milestone (red star, no duration)"
+                      }
+                      aria-label="Toggle milestone marker"
+                      aria-pressed={!!t.isMarker}
+                      onClick={() => onToggleMarker(t.id)}
+                    >
+                      {t.isMarker ? "★" : "☆"}
+                    </button>
                   </div>
                   <div className="pg-col-start">
                     <input
@@ -657,20 +848,28 @@ export function GanttBoard({
                     />
                   </div>
                   <div className="pg-col-dur">
-                    <input
-                      className="pg-input dur"
-                      type="number"
-                      min={1}
-                      value={t.durationDays}
-                      onChange={(e) => {
-                        const durationDays = Math.max(1, Number(e.target.value) || 1);
-                        const due = t.start
-                          ? dueFromStartDuration(t.start, durationDays, holidaysOn)
-                          : t.due;
-                        onScheduleEdit(t.id, { durationDays, due });
-                      }}
-                    />
-                    <span className="pg-dur-suffix">d</span>
+                    {t.isMarker ? (
+                      <span className="pg-dur-milestone" title="Milestone (no duration)">
+                        ★
+                      </span>
+                    ) : (
+                      <>
+                        <input
+                          className="pg-input dur"
+                          type="number"
+                          min={1}
+                          value={t.durationDays}
+                          onChange={(e) => {
+                            const durationDays = Math.max(1, Number(e.target.value) || 1);
+                            const due = t.start
+                              ? dueFromStartDuration(t.start, durationDays, holidaysOn)
+                              : t.due;
+                            onScheduleEdit(t.id, { durationDays, due });
+                          }}
+                        />
+                        <span className="pg-dur-suffix">d</span>
+                      </>
+                    )}
                   </div>
                   <div className="pg-col-status">
                     <StatusSelect
@@ -692,7 +891,38 @@ export function GanttBoard({
                     projStartLeft={projStartLeft}
                     projEndLeft={projEndLeft}
                   />
-                  {geo && (
+                  {t.isMarker ? (
+                    (() => {
+                      const md = t.start || t.due;
+                      const mx = md ? markerLeft(days, md, dayWidth) : null;
+                      if (mx == null) return null;
+                      return (
+                        <div
+                          className={`pg-milestone-star${
+                            drag?.taskId === t.id ? " dragging" : ""
+                          }`}
+                          style={{ left: mx }}
+                          title={`Milestone: ${md}`}
+                          onPointerDown={(e) => {
+                            if (!t.start) return;
+                            beginDrag(
+                              {
+                                kind: "move",
+                                taskId: t.id,
+                                startX: e.clientX,
+                                origStart: t.start,
+                                durationDays: t.durationDays,
+                                lastStart: t.start,
+                              },
+                              e,
+                            );
+                          }}
+                        >
+                          ★
+                        </div>
+                      );
+                    })()
+                  ) : geo ? (
                     <div
                       className={`pg-bar${drag?.taskId === t.id ? (drag.kind === "resize" ? " resizing" : " dragging") : ""}`}
                       style={{
@@ -734,7 +964,7 @@ export function GanttBoard({
                         }}
                       />
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
             );
@@ -749,27 +979,23 @@ export function GanttBoard({
             >
               <defs>
                 <marker
-                  id="arrow"
+                  id="dep-arrow"
                   viewBox="0 0 10 10"
-                  refX="8"
+                  refX="9"
                   refY="5"
-                  markerWidth="6"
-                  markerHeight="6"
+                  markerWidth="9"
+                  markerHeight="9"
+                  markerUnits="userSpaceOnUse"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1" />
+                  <path className="pg-dep-arrow" d="M1.5,1.5 L9,5 L1.5,8.5 Z" />
                 </marker>
               </defs>
               {depPaths.map((p, i) => (
-                <path
-                  key={i}
-                  d={p.d}
-                  fill="none"
-                  stroke={p.color}
-                  strokeWidth={1.5}
-                  opacity={0.75}
-                  markerEnd="url(#arrow)"
-                />
+                <g key={i}>
+                  <circle className="pg-dep-dot" cx={p.x1} cy={p.y1} r={2.2} />
+                  <path className="pg-dep-path" d={p.d} markerEnd="url(#dep-arrow)" />
+                </g>
               ))}
             </svg>
           )}

@@ -28,6 +28,8 @@ export interface GanttTask {
   blockedBy: string[];
   /** Jira updated ISO timestamp at last pull (for optimistic lock) */
   jiraUpdated: string;
+  /** Show as a zero-duration milestone marker (red star) instead of a bar. */
+  isMarker?: boolean;
   /** True when start/duration differ from last pull and need Push */
   scheduleDirty?: boolean;
   /** True when a status transition is pending Push */
@@ -74,6 +76,12 @@ export interface LocalState {
   allocations: Record<string, string[]>;
   /** epicKey -> collapsed */
   collapsed: Record<string, boolean>;
+  /** epicKey -> ordered task ids (custom manual order) */
+  taskOrder: Record<string, string[]>;
+  /** ordered epic keys (custom manual order) */
+  milestoneOrder: string[];
+  /** issueKey -> shown as a milestone marker (red star) */
+  markers: Record<string, boolean>;
   projectStart: string;
   showHolidays: boolean;
   showDeps: boolean;

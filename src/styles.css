@@ -24,6 +24,7 @@
   --weekend-bg: #eef1f4;
   --holiday-bg: #fff7ed;
   --holiday-ink: #b45309;
+  --dep-line: #64748b;
   --input-bg: #ffffff;
   --radius: 12px;
   --shadow-sm: 0 1px 2px rgba(20, 35, 76, 0.06);
@@ -62,6 +63,7 @@
   --weekend-bg: #1a222d;
   --holiday-bg: #3a2a14;
   --holiday-ink: #fbbf24;
+  --dep-line: #7c8aa0;
   --input-bg: #121820;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   color-scheme: dark;
@@ -335,6 +337,40 @@ body.pg-resizing-x .pg-resize-x::after {
   opacity: 1;
   background: var(--sky);
 }
+/* Full-height column-panel divider, pinned to the left/right panel boundary */
+.pg-left-divider-rail {
+  position: sticky;
+  left: 0;
+  top: 0;
+  width: var(--left-w);
+  height: 0;
+  z-index: 9;
+  pointer-events: none;
+}
+.pg-resize-x-full {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 9px;
+  cursor: col-resize;
+  pointer-events: auto;
+}
+.pg-resize-x-full::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: var(--line-strong);
+  opacity: 0.55;
+  transition: opacity 0.12s, background 0.12s;
+}
+.pg-resize-x-full:hover::after,
+body.pg-resizing-x .pg-resize-x-full::after {
+  opacity: 1;
+  background: var(--sky);
+}
 .pg-resize-day {
   position: absolute;
   top: 0;
@@ -428,6 +464,39 @@ body.pg-resizing-y .pg-bar {
   border-radius: 50%;
   background: #d97706;
 }
+.pg-drag-handle {
+  cursor: grab;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 2px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  user-select: none;
+}
+.pg-drag-handle:active { cursor: grabbing; }
+.pg-row:hover .pg-drag-handle { opacity: 1; }
+.pg-drag-handle:hover {
+  color: var(--sky-600);
+  background: var(--sky-050);
+}
+.pg-col-num-id { display: block; }
+.pg-row.row-dragging { opacity: 0.5; }
+.pg-row.drop-before::before,
+.pg-row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--sky);
+  box-shadow: 0 0 0 1px var(--sky);
+  z-index: 7;
+  pointer-events: none;
+}
+.pg-row.drop-before::before { top: -1px; }
+.pg-row.drop-after::after { bottom: -1px; }
 .pg-col-name {
   width: var(--name-w);
   flex: none;
@@ -899,6 +968,19 @@ body.pg-resizing-y .pg-bar {
   pointer-events: none;
   overflow: visible;
 }
+.pg-dep-path {
+  fill: none;
+  stroke: var(--dep-line);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.pg-dep-arrow { fill: var(--dep-line); }
+.pg-dep-dot {
+  fill: var(--surface);
+  stroke: var(--dep-line);
+  stroke-width: 1.6;
+}
 .pg-marker {
   position: absolute;
   top: 0;
@@ -947,6 +1029,49 @@ body.pg-resizing-y .pg-bar {
 }
 .pg-bar.dragging { cursor: grabbing; opacity: 0.9; }
 .pg-bar.resizing { cursor: ew-resize; opacity: 0.95; }
+.pg-milestone-star {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: #ef4444;
+  font-size: 20px;
+  line-height: 1;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  z-index: 2;
+}
+.pg-milestone-star:hover { color: #dc2626; }
+.pg-milestone-star.dragging { cursor: grabbing; opacity: 0.85; }
+.pg-marker-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.pg-row.task:hover .pg-marker-toggle { opacity: 1; }
+.pg-marker-toggle:hover { color: #ef4444; }
+.pg-marker-toggle.on {
+  opacity: 1;
+  color: #ef4444;
+}
+.pg-dur-milestone {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ef4444;
+  font-size: 14px;
+  font-weight: 700;
+}
 .pg-bar.milestone-bar {
   height: 12px;
   border-radius: 999px;
@@ -1126,6 +1251,24 @@ body.pg-resizing-bar .pg-board {
   min-width: 42px;
   padding-left: 10px;
   padding-right: 10px;
+}
+.gantt-btn.token-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  background: #d97706;
+  color: #fff;
+  border-color: #d97706;
+}
+.gantt-btn.token-btn::before {
+  content: "🔑";
+  font-size: 12px;
+}
+.gantt-btn.token-btn:hover {
+  background: #b45309;
+  border-color: #b45309;
+  color: #fff;
 }
 
 .push-results {

@@ -435,6 +435,40 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   // Prefer human titles (M0/M1/M2…) over raw keys
   milestones.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
 
+  // Apply saved manual epic order; unknown/new epics keep title order at the end.
+  const msOrder = local.milestoneOrder || [];
+  if (msOrder.length) {
+    const msPos = new Map(msOrder.map((id, i) => [id, i]));
+    milestones.sort((a, b) => {
+      const pa = msPos.has(a.id) ? (msPos.get(a.id) as number) : Number.MAX_SAFE_INTEGER;
+      const pb = msPos.has(b.id) ? (msPos.get(b.id) as number) : Number.MAX_SAFE_INTEGER;
+      if (pa !== pb) return pa - pb;
+      return a.title.localeCompare(b.title, undefined, { numeric: true });
+    });
+  }
+
+  // Restore saved milestone-marker flags.
+  const savedMarkers = local.markers || {};
+  for (const m of milestones) {
+    for (const t of m.tasks) t.isMarker = savedMarkers[t.id] === true;
+  }
+
+  // Apply saved manual task order; unknown/new tasks keep Jira order at the end.
+  const savedOrder = local.taskOrder || {};
+  for (const m of milestones) {
+    const ord = savedOrder[m.id];
+    if (!ord || !ord.length) continue;
+    const pos = new Map(ord.map((id, i) => [id, i]));
+    m.tasks = m.tasks
+      .map((t, i) => ({ t, i }))
+      .sort((a, b) => {
+        const pa = pos.has(a.t.id) ? (pos.get(a.t.id) as number) : Number.MAX_SAFE_INTEGER;
+        const pb = pos.has(b.t.id) ? (pos.get(b.t.id) as number) : Number.MAX_SAFE_INTEGER;
+        return pa - pb || a.i - b.i;
+      })
+      .map((x) => x.t);
+  }
+
   const projectStart =
     local.projectStart ||
     milestones
