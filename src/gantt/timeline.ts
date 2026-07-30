@@ -3,13 +3,24 @@ import {
   addDays,
   daysBetween,
   formatYmd,
-  holidayName,
-  isHoliday,
+  customOffDayName,
+  isCustomOffDay,
+  isIsraelHoliday,
+  israelHolidayName,
   isWeekend,
   parseYmd,
   taskEnd,
   todayLocal,
 } from "../lib/workdays";
+
+/** Timeline day column width (px) — zoom bounds. */
+export const DAY_WIDTH_MIN = 12;
+export const DAY_WIDTH_MAX = 56;
+export const DAY_WIDTH_STEP = 4;
+
+export function clampDayWidth(px: number): number {
+  return Math.min(DAY_WIDTH_MAX, Math.max(DAY_WIDTH_MIN, Math.round(px)));
+}
 
 export interface DayCol {
   date: Date;
@@ -104,8 +115,9 @@ export function buildDays(start: Date, end: Date, holidaysOn: boolean): DayCol[]
       dow: DOW[cur.getDay()],
       dom: cur.getDate(),
       isWeekend: isWeekend(cur),
-      isHoliday: holidaysOn && isHoliday(cur),
-      holidayLabel: holidaysOn ? holidayName(cur) : null,
+      isHoliday: isCustomOffDay(cur) || (holidaysOn && isIsraelHoliday(cur)),
+      holidayLabel:
+        customOffDayName(cur) || (holidaysOn ? israelHolidayName(cur) : null),
       monthLabel: month !== lastMonth ? `${MONTHS[month]} ${cur.getFullYear()}` : null,
     });
     lastMonth = month;

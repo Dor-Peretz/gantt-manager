@@ -3,6 +3,7 @@
   "projectStart": "2026-07-21",
   "showHolidays": true,
   "showDeps": true,
+  "customNonWorkingDays": [],
   "dayWidthPx": 28,
   "leftPanelWidth": 680,
   "resourcesDockHeight": 220,

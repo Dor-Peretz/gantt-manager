@@ -19,10 +19,14 @@ import { EpicColorPicker } from "./EpicColorPicker";
 import { ResourcesPane } from "./ResourcesPane";
 import { StatusSelect } from "./StatusSelect";
 import {
+  DAY_WIDTH_MAX,
+  DAY_WIDTH_MIN,
+  DAY_WIDTH_STEP,
   ROW_H,
   barGeometry,
   buildDays,
   buildRows,
+  clampDayWidth,
   isEpicSelfTask,
   markerLeft,
   milestoneSpan,
@@ -37,8 +41,6 @@ const LEFT_MIN = 48 + 108 + 78 + 108 + 100 + 120;
 const LEFT_MAX = 960;
 const RES_DOCK_MIN = 96;
 const RES_DOCK_MAX = 560;
-const DAY_W_MIN = 18;
-const DAY_W_MAX = 48;
 /** # + Start + Dur + Status + Res (name column gets the rest) */
 const LEFT_FIXED_OTHER = 48 + 108 + 78 + 108 + 100;
 
@@ -102,6 +104,12 @@ interface Props {
   model: GanttModel;
   jiraBaseUrl: string;
   initialScroll?: ScrollState | null;
+  /** Screenshot-ready: hide editors, resize chrome, and resources dock. */
+  preview?: boolean;
+  /** Show loading overlay while syncing with Jira. */
+  loading?: "pull" | "push" | null;
+  /** Optional detail under the loading spinner (e.g. push item count). */
+  loadingDetail?: string | null;
   onScheduleEdit: (taskId: string, patch: Partial<GanttTask>) => void;
   onStatusEdit: (
     taskId: string,
@@ -121,6 +129,8 @@ interface Props {
   onDeleteDraftTask: (taskId: string) => void;
   onLayoutChange: (patch: Partial<GanttModel>) => void;
   onScrollChange?: (scroll: ScrollState) => void;
+  onAddTask?: () => void;
+  onAddMilestone?: () => void;
 }
 
 type DragMode =
@@ -146,6 +156,9 @@ export function GanttBoard({
   model,
   jiraBaseUrl,
   initialScroll,
+  preview = false,
+  loading = null,
+  loadingDetail = null,
   onScheduleEdit,
   onStatusEdit,
   onToggleCollapse,
@@ -157,11 +170,15 @@ export function GanttBoard({
   onDeleteDraftTask,
   onLayoutChange,
   onScrollChange,
+  onAddTask,
+  onAddMilestone,
 }: Props) {
+  const hasEpics = model.milestones.some((m) => !m.localOnly);
   const holidaysOn = model.showHolidays;
   const dayWidth = model.dayWidthPx || 28;
   const leftW = model.leftPanelWidth || 680;
   const resDockH = model.resourcesDockHeight || 220;
+  const resDockCollapsed = !!model.resourcesDockCollapsed;
   const nameW = Math.max(120, leftW - LEFT_FIXED_OTHER);
   const tasksScrollRef = useRef<HTMLDivElement>(null);
   const resScrollRef = useRef<HTMLDivElement>(null);
@@ -211,8 +228,8 @@ export function GanttBoard({
     { min: RES_DOCK_MIN, max: RES_DOCK_MAX, sign: -1 },
   );
   const dayResize = useDragResize("x", (dayWidthPx) => onLayoutChange({ dayWidthPx }), {
-    min: DAY_W_MIN,
-    max: DAY_W_MAX,
+    min: DAY_WIDTH_MIN,
+    max: DAY_WIDTH_MAX,
   });
 
   function syncHorizontal(from: "tasks" | "res") {
@@ -399,7 +416,54 @@ export function GanttBoard({
   } as React.CSSProperties;
 
   return (
-    <div className="pg-shell" style={shellStyle}>
+    <div className={`pg-shell${preview ? " pg-preview" : ""}`} style={shellStyle}>
+      {loading && (
+        <div
+          className={`pg-loading pg-loading-${loading}`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className={`pg-loadbar pg-loadbar-board${loading === "push" ? " push" : ""}`} />
+          <span className="pg-spinner" aria-hidden />
+          <span className="pg-loading-text">
+            {loading === "pull" ? "Pulling from Jira…" : "Pushing to Jira…"}
+          </span>
+          {loadingDetail ? (
+            <span className="pg-loading-detail">{loadingDetail}</span>
+          ) : null}
+        </div>
+      )}
+      {!preview && (
+        <div className="pg-zoom pg-zoom-timeline" title="Timeline zoom">
+          <button
+            type="button"
+            className="gantt-btn"
+            disabled={dayWidth <= DAY_WIDTH_MIN}
+            onClick={() =>
+              onLayoutChange({
+                dayWidthPx: clampDayWidth(dayWidth - DAY_WIDTH_STEP),
+              })
+            }
+            aria-label="Zoom out timeline"
+          >
+            −
+          </button>
+          <span className="pg-zoom-label">{dayWidth}px</span>
+          <button
+            type="button"
+            className="gantt-btn"
+            disabled={dayWidth >= DAY_WIDTH_MAX}
+            onClick={() =>
+              onLayoutChange({
+                dayWidthPx: clampDayWidth(dayWidth + DAY_WIDTH_STEP),
+              })
+            }
+            aria-label="Zoom in timeline"
+          >
+            +
+          </button>
+        </div>
+      )}
       <div
         className="pg-scroll"
         ref={tasksScrollRef}
@@ -408,22 +472,49 @@ export function GanttBoard({
       >
         <div className="pg-canvas" style={{ minHeight: canvasH }}>
           {/* Full-height divider to resize the columns panel (drag left/right) */}
-          <div className="pg-left-divider-rail">
-            <div
-              className="pg-resize-x pg-resize-x-full"
-              title="Drag to resize columns"
-              style={{ height: canvasH }}
-              onPointerDown={(e) => leftResize.begin(e, leftW)}
-            />
-          </div>
+          {!preview && (
+            <div className="pg-left-divider-rail">
+              <div
+                className="pg-resize-x pg-resize-x-full"
+                title="Drag to resize columns"
+                style={{ height: canvasH }}
+                onPointerDown={(e) => leftResize.begin(e, leftW)}
+              />
+            </div>
+          )}
           {/* Header */}
           <div className="pg-row pg-head">
             <div className="pg-fixed">
               <div className="pg-col-num">#</div>
-              <div className="pg-col-name">
+              <div className="pg-col-name pg-col-name-head">
                 <span className="pg-name-text" style={{ fontWeight: 700, color: "var(--muted)" }}>
                   Name
                 </span>
+                {!preview && (onAddTask || onAddMilestone) && (
+                  <div className="pg-board-actions">
+                    {onAddTask && (
+                      <button
+                        type="button"
+                        className="gantt-btn pg-board-action"
+                        disabled={!hasEpics}
+                        onClick={onAddTask}
+                        title="Add a draft task under an epic — Push creates it in Jira"
+                      >
+                        + Task
+                      </button>
+                    )}
+                    {onAddMilestone && (
+                      <button
+                        type="button"
+                        className="gantt-btn pg-board-action"
+                        onClick={onAddMilestone}
+                        title="Add a top-level milestone (red star) — not synced to Jira"
+                      >
+                        + Milestone
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="pg-col-start" style={{ fontWeight: 700, color: "var(--muted)", fontSize: 11 }}>
                 Start
@@ -459,11 +550,13 @@ export function GanttBoard({
                     </div>
                   ))}
                 </div>
-                <div
-                  className="pg-resize-day"
-                  title="Drag to zoom day width"
-                  onPointerDown={(e) => dayResize.begin(e, dayWidth)}
-                />
+                {!preview && (
+                  <div
+                    className="pg-resize-day"
+                    title="Drag to zoom day width"
+                    onPointerDown={(e) => dayResize.begin(e, dayWidth)}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -741,7 +834,7 @@ export function GanttBoard({
                           drag?.taskId === epicSelf.id ? " dragging" : ""
                         }`}
                         style={{ left: localStarLeft }}
-                        title={`Milestone: ${localDate}`}
+                        title={`Milestone: ${r.milestone.title} · ${localDate}`}
                         onPointerDown={(e) => {
                           if (!epicSelf.start) return;
                           beginDrag(
@@ -757,7 +850,8 @@ export function GanttBoard({
                           );
                         }}
                       >
-                        ★
+                        <span className="pg-milestone-star-icon">★</span>
+                        <span className="pg-milestone-star-name">{r.milestone.title}</span>
                       </div>
                     ) : msGeo ? (
                       <div
@@ -1045,7 +1139,7 @@ export function GanttBoard({
                             drag?.taskId === t.id ? " dragging" : ""
                           }`}
                           style={{ left: mx }}
-                          title={`Milestone: ${md}`}
+                          title={`Milestone: ${t.title} · ${md}`}
                           onPointerDown={(e) => {
                             if (!t.start) return;
                             beginDrag(
@@ -1061,7 +1155,8 @@ export function GanttBoard({
                             );
                           }}
                         >
-                          ★
+                          <span className="pg-milestone-star-icon">★</span>
+                          <span className="pg-milestone-star-name">{t.title}</span>
                         </div>
                       );
                     })()
@@ -1145,24 +1240,49 @@ export function GanttBoard({
         </div>
       </div>
 
-      <div
-        className="pg-split-y"
-        title="Drag to resize Resources panel"
-        onPointerDown={(e) => dockResize.begin(e, resDockH)}
-      >
-        <span>Resources · drag to resize</span>
-      </div>
+      {!preview && (
+        <>
+          <div
+            className={`pg-split-y${resDockCollapsed ? " collapsed" : ""}`}
+            title={
+              resDockCollapsed
+                ? "Resources minimized"
+                : "Drag to resize Resources panel"
+            }
+            onPointerDown={(e) => {
+              if (resDockCollapsed) return;
+              dockResize.begin(e, resDockH);
+            }}
+          >
+            <span>Resources{resDockCollapsed ? " · minimized" : " · drag to resize"}</span>
+            <button
+              type="button"
+              className="pg-dock-toggle"
+              title={resDockCollapsed ? "Expand Resources" : "Minimize Resources"}
+              aria-label={resDockCollapsed ? "Expand Resources" : "Minimize Resources"}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() =>
+                onLayoutChange({ resourcesDockCollapsed: !resDockCollapsed })
+              }
+            >
+              {resDockCollapsed ? "▴ Expand" : "▾ Minimize"}
+            </button>
+          </div>
 
-      <div
-        className="pg-resources-dock"
-        ref={resScrollRef}
-        onScroll={() => syncHorizontal("res")}
-        style={{ height: resDockH, maxHeight: "none" }}
-      >
-        <div className="pg-canvas">
-          <ResourcesPane model={model} days={days} dayWidth={dayWidth} />
-        </div>
-      </div>
+          {!resDockCollapsed && (
+            <div
+              className="pg-resources-dock"
+              ref={resScrollRef}
+              onScroll={() => syncHorizontal("res")}
+              style={{ height: resDockH, maxHeight: "none" }}
+            >
+              <div className="pg-canvas">
+                <ResourcesPane model={model} days={days} dayWidth={dayWidth} />
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

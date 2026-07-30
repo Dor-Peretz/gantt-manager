@@ -11,6 +11,7 @@ import {
   dueFromStartDuration,
   durationFromStartDue,
   initialsFromName,
+  setCustomNonWorkingDays,
   startFromDueDuration,
 } from "../src/lib/workdays.ts";
 import { mergeState, readState } from "./state.ts";
@@ -302,6 +303,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   const fieldMap = await discoverFields();
   const local = readState();
   const holidaysOn = local.showHolidays !== false;
+  setCustomNonWorkingDays(local.customNonWorkingDays || []);
 
   const fields = [
     "summary",
@@ -492,9 +494,11 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     dayWidthPx: local.dayWidthPx || 28,
     leftPanelWidth: local.leftPanelWidth || 680,
     resourcesDockHeight: local.resourcesDockHeight || 220,
+    resourcesDockCollapsed: local.resourcesDockCollapsed === true,
     hoursPerDay: 8,
     showHolidays: local.showHolidays !== false,
     showDeps: local.showDeps !== false,
+    customNonWorkingDays: local.customNonWorkingDays ?? [],
     jql,
     resources,
     milestones,

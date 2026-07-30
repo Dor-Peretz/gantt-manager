@@ -60,6 +60,12 @@ export interface LocalMarker {
   epicId?: string;
 }
 
+/** User-defined non-working day (always applies, independent of IL holidays toggle). */
+export interface CustomNonWorkingDay {
+  date: string;
+  name?: string;
+}
+
 /** Draft task awaiting Push → Jira create. */
 export interface DraftTask {
   id: string;
@@ -87,9 +93,13 @@ export interface GanttModel {
   leftPanelWidth: number;
   /** Height of the pinned Resources dock (px) */
   resourcesDockHeight: number;
+  /** When true, Resources dock is minimized */
+  resourcesDockCollapsed: boolean;
   hoursPerDay: number;
   showHolidays: boolean;
   showDeps: boolean;
+  /** Manual off days — always skip in schedule/resource math. */
+  customNonWorkingDays: CustomNonWorkingDay[];
   jql: string;
   resources: Resource[];
   milestones: Milestone[];
@@ -117,9 +127,11 @@ export interface LocalState {
   projectStart: string;
   showHolidays: boolean;
   showDeps: boolean;
+  customNonWorkingDays: CustomNonWorkingDay[];
   dayWidthPx: number;
   leftPanelWidth: number;
   resourcesDockHeight: number;
+  resourcesDockCollapsed: boolean;
   jql: string;
   milestoneColors: Record<string, string>;
   theme: ThemeMode;
@@ -189,9 +201,11 @@ export function emptyModel(jql = ""): GanttModel {
     dayWidthPx: 28,
     leftPanelWidth: 680,
     resourcesDockHeight: 220,
+    resourcesDockCollapsed: false,
     hoursPerDay: 8,
     showHolidays: true,
     showDeps: true,
+    customNonWorkingDays: [],
     jql,
     resources: [],
     milestones: [],

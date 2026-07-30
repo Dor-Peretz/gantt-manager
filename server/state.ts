@@ -20,9 +20,11 @@ const DEFAULT_STATE: LocalState = {
   projectStart: new Date().toISOString().slice(0, 10),
   showHolidays: true,
   showDeps: true,
+  customNonWorkingDays: [],
   dayWidthPx: 28,
   leftPanelWidth: 680,
   resourcesDockHeight: 220,
+  resourcesDockCollapsed: false,
   jql: process.env.JIRA_JQL || "",
   milestoneColors: {},
   theme: "light",
@@ -59,9 +61,11 @@ function normalize(raw: Partial<LocalState> | null | undefined): LocalState {
     projectStart: raw?.projectStart || DEFAULT_STATE.projectStart,
     showHolidays: raw?.showHolidays !== false,
     showDeps: raw?.showDeps !== false,
+    customNonWorkingDays: raw?.customNonWorkingDays ?? [],
     dayWidthPx: raw?.dayWidthPx || 28,
     leftPanelWidth: raw?.leftPanelWidth || 680,
     resourcesDockHeight: raw?.resourcesDockHeight || 220,
+    resourcesDockCollapsed: raw?.resourcesDockCollapsed === true,
     theme: raw?.theme === "dark" ? "dark" : "light",
   };
 }

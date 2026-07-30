@@ -1,5 +1,7 @@
 /** Non-working days: Friday + Saturday (Sun–Thu work week). */
 
+import type { CustomNonWorkingDay } from "./types";
+
 export interface Holiday {
   date: string;
   name: string;
@@ -32,6 +34,31 @@ export const ISRAEL_HOLIDAYS: Holiday[] = [
 
 const HOLIDAY_BY_YMD: Record<string, string> = {};
 for (const h of ISRAEL_HOLIDAYS) HOLIDAY_BY_YMD[h.date] = h.name;
+
+let CUSTOM_BY_YMD: Record<string, string> = {};
+
+export function setCustomNonWorkingDays(days: CustomNonWorkingDay[]): void {
+  CUSTOM_BY_YMD = {};
+  for (const d of days) {
+    CUSTOM_BY_YMD[d.date] = d.name?.trim() || "Off day";
+  }
+}
+
+export function customOffDayName(d: Date): string | null {
+  return CUSTOM_BY_YMD[formatYmd(d)] || null;
+}
+
+export function israelHolidayName(d: Date): string | null {
+  return HOLIDAY_BY_YMD[formatYmd(d)] || null;
+}
+
+export function isCustomOffDay(d: Date): boolean {
+  return !!customOffDayName(d);
+}
+
+export function isIsraelHoliday(d: Date): boolean {
+  return !!israelHolidayName(d);
+}
 
 export function parseYmd(s: string): Date {
   const p = String(s).split("-");
@@ -66,16 +93,17 @@ export function isWeekend(d: Date): boolean {
 }
 
 export function holidayName(d: Date): string | null {
-  return HOLIDAY_BY_YMD[formatYmd(d)] || null;
+  return customOffDayName(d) || israelHolidayName(d);
 }
 
 export function isHoliday(d: Date): boolean {
-  return !!holidayName(d);
+  return isCustomOffDay(d) || isIsraelHoliday(d);
 }
 
 export function isNonWorking(d: Date, holidaysOn: boolean): boolean {
   if (isWeekend(d)) return true;
-  if (holidaysOn && isHoliday(d)) return true;
+  if (isCustomOffDay(d)) return true;
+  if (holidaysOn && isIsraelHoliday(d)) return true;
   return false;
 }
 

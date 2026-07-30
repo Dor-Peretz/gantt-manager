@@ -26,6 +26,7 @@ import {
   newLocalMarkerId,
 } from "./lib/localMarkers";
 import type {
+  CustomNonWorkingDay,
   DraftTask,
   GanttModel,
   GanttTask,
@@ -35,7 +36,7 @@ import type {
   ThemeMode,
 } from "./lib/types";
 import { emptyModel } from "./lib/types";
-import { dueFromStartDuration } from "./lib/workdays";
+import { dueFromStartDuration, setCustomNonWorkingDays } from "./lib/workdays";
 
 function applyTheme(theme: ThemeMode) {
   document.documentElement.setAttribute("data-theme", theme);
@@ -77,9 +78,11 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
     projectStart: next.projectStart,
     showHolidays: next.showHolidays,
     showDeps: next.showDeps,
+    customNonWorkingDays: next.customNonWorkingDays,
     dayWidthPx: next.dayWidthPx,
     leftPanelWidth: next.leftPanelWidth,
     resourcesDockHeight: next.resourcesDockHeight,
+    resourcesDockCollapsed: next.resourcesDockCollapsed,
     jql: jqlOverride ?? next.jql,
   };
 }
@@ -93,6 +96,8 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
   }
   const merged: GanttModel = {
     ...fresh,
+    customNonWorkingDays:
+      fresh.customNonWorkingDays ?? previous.customNonWorkingDays ?? [],
     milestones: fresh.milestones.map((m) => {
       const prev = prevById.get(m.id);
       return {
@@ -259,10 +264,16 @@ export default function App() {
             projectStart: prefs?.projectStart || cache.model.projectStart,
             showHolidays: prefs?.showHolidays !== false,
             showDeps: prefs?.showDeps !== false,
+            customNonWorkingDays:
+              prefs?.customNonWorkingDays ?? cache.model.customNonWorkingDays ?? [],
             dayWidthPx: prefs?.dayWidthPx || cache.model.dayWidthPx,
             leftPanelWidth: prefs?.leftPanelWidth || cache.model.leftPanelWidth,
             resourcesDockHeight:
               prefs?.resourcesDockHeight || cache.model.resourcesDockHeight || 220,
+            resourcesDockCollapsed:
+              prefs?.resourcesDockCollapsed ??
+              cache.model.resourcesDockCollapsed ??
+              false,
           };
           if (prefs?.localMarkers?.length) {
             restored = injectLocalMarkers(
@@ -290,9 +301,11 @@ export default function App() {
             projectStart: prefs?.projectStart || m.projectStart,
             showHolidays: prefs?.showHolidays !== false,
             showDeps: prefs?.showDeps !== false,
+            customNonWorkingDays: prefs?.customNonWorkingDays ?? [],
             dayWidthPx: prefs?.dayWidthPx || m.dayWidthPx,
             leftPanelWidth: prefs?.leftPanelWidth || m.leftPanelWidth,
             resourcesDockHeight: prefs?.resourcesDockHeight || m.resourcesDockHeight,
+            resourcesDockCollapsed: prefs?.resourcesDockCollapsed ?? false,
             resources: prefs?.resources || [],
           }));
         }
@@ -337,6 +350,29 @@ export default function App() {
 
   const [addMsOpen, setAddMsOpen] = useState(false);
   const [addTaskOpen, setAddTaskOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewChromeHidden, setPreviewChromeHidden] = useState(false);
+  const [offDayDate, setOffDayDate] = useState("");
+  const [offDayName, setOffDayName] = useState("");
+
+  useEffect(() => {
+    setCustomNonWorkingDays(model.customNonWorkingDays || []);
+  }, [model.customNonWorkingDays]);
+
+  useEffect(() => {
+    if (!previewOpen) {
+      setPreviewChromeHidden(false);
+      return;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (previewChromeHidden) setPreviewChromeHidden(false);
+        else setPreviewOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [previewOpen, previewChromeHidden]);
 
   function toggleTheme() {
     const next: ThemeMode = theme === "dark" ? "light" : "dark";
@@ -356,6 +392,29 @@ export default function App() {
     },
     [persistLocal, persistCache, jql],
   );
+
+  function addCustomOffDay() {
+    const date = offDayDate.trim();
+    if (!date) return;
+    updateModel((prev) => {
+      const existing = prev.customNonWorkingDays || [];
+      if (existing.some((d) => d.date === date)) return prev;
+      const next: CustomNonWorkingDay[] = [
+        ...existing,
+        { date, name: offDayName.trim() || undefined },
+      ].sort((a, b) => a.date.localeCompare(b.date));
+      return { ...prev, customNonWorkingDays: next };
+    });
+    setOffDayDate("");
+    setOffDayName("");
+  }
+
+  function removeCustomOffDay(date: string) {
+    updateModel((prev) => ({
+      ...prev,
+      customNonWorkingDays: (prev.customNonWorkingDays || []).filter((d) => d.date !== date),
+    }));
+  }
 
   function onJqlChange(value: string) {
     setJql(value);
@@ -645,34 +704,105 @@ export default function App() {
     setStatus("Epic color saved");
   }
 
+  const showLoadBar = busy !== null || health == null;
+
   return (
-    <div className="app">
+    <div className={`app${previewOpen ? " is-preview" : ""}`}>
+      {showLoadBar && (
+        <div
+          className={`pg-loadbar${busy === "push" ? " push" : ""}${health == null && !busy ? " boot" : ""}`}
+          role="progressbar"
+          aria-busy="true"
+          aria-label={
+            busy === "push"
+              ? "Pushing to Jira"
+              : busy === "pull"
+                ? "Pulling from Jira"
+                : "Loading"
+          }
+        />
+      )}
+      {previewOpen && !previewChromeHidden && (
+        <div className="gantt-preview-chrome">
+          <BrandLockup />
+          <p className="gantt-preview-hint">
+            Clean preview — screenshot this view · Esc to close
+          </p>
+          <button
+            type="button"
+            className="gantt-btn"
+            onClick={() => setPreviewChromeHidden(true)}
+            title="Hide this bar so your screenshot is clean (Esc brings it back)"
+          >
+            Hide bar
+          </button>
+          <button
+            type="button"
+            className="gantt-btn primary"
+            onClick={() => setPreviewOpen(false)}
+          >
+            Close
+          </button>
+        </div>
+      )}
       <header className="app-header">
         <BrandLockup />
         <div className="app-header-actions">
+          <div className="app-header-actions-row">
+            <button
+              type="button"
+              className="gantt-btn theme-toggle"
+              onClick={toggleTheme}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {theme === "dark" ? (
+                <>
+                  <svg className="theme-icon" viewBox="0 0 24 24" aria-hidden>
+                    <circle cx="12" cy="12" r="4" fill="currentColor" />
+                    <path
+                      fill="currentColor"
+                      d="M12 2.5a1 1 0 0 1 1 1V5a1 1 0 1 1-2 0V3.5a1 1 0 0 1 1-1Zm0 14a1 1 0 0 1 1 1v1.5a1 1 0 1 1-2 0V17.5a1 1 0 0 1 1-1ZM3.5 11a1 1 0 0 0 0 2H5a1 1 0 1 0 0-2H3.5Zm14 0a1 1 0 1 0 0 2H19a1 1 0 1 0 0-2h-1.5ZM5.99 5.99a1 1 0 0 0 0 1.41L7.05 8.46A1 1 0 1 0 8.46 7.05L7.4 5.99a1 1 0 0 0-1.41 0Zm9.55 9.55a1 1 0 0 0 0 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41l-1.06-1.06a1 1 0 0 0-1.41 0ZM18.01 5.99a1 1 0 0 0-1.41 0L15.54 7.05A1 1 0 1 0 16.95 8.46l1.06-1.06a1 1 0 0 0 0-1.41ZM8.46 15.54a1 1 0 0 0-1.41 0L5.99 16.6a1 1 0 0 0 1.41 1.41l1.06-1.06a1 1 0 0 0 0-1.41Z"
+                    />
+                  </svg>
+                  Light
+                </>
+              ) : (
+                <>
+                  <svg className="theme-icon" viewBox="0 0 24 24" aria-hidden>
+                    <path
+                      fill="currentColor"
+                      d="M12.5 3.1a1 1 0 0 0-1.05.14A8.5 8.5 0 1 0 20.76 12.55a1 1 0 0 0-1.35-1.2 6.5 6.5 0 0 1-7.96-7.96 1 1 0 0 0-.95-1.29Z"
+                    />
+                  </svg>
+                  Dark
+                </>
+              )}
+            </button>
+            {health != null && !health.ok && (
+              <a
+                className="gantt-btn token-btn"
+                href="https://id.atlassian.com/manage-profile/security/api-tokens"
+                target="_blank"
+                rel="noreferrer"
+                title="Create a Jira API token, then add it to .env as JIRA_API_TOKEN"
+              >
+                Get Jira token
+              </a>
+            )}
+            <span className={`health ${health?.ok ? "ok" : "bad"}`}>
+              {health == null ? "…" : health.ok ? "Jira connected" : "Jira offline"}
+            </span>
+          </div>
           <button
             type="button"
-            className="gantt-btn theme-toggle"
-            onClick={toggleTheme}
-            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            className="gantt-btn"
+            disabled={!model.milestones.length}
+            onClick={() => setPreviewOpen(true)}
+            title="Open a clean, screenshot-ready Gantt view"
           >
-            {theme === "dark" ? "Light" : "Dark"}
+            Preview
           </button>
-          {health != null && !health.ok && (
-            <a
-              className="gantt-btn token-btn"
-              href="https://id.atlassian.com/manage-profile/security/api-tokens"
-              target="_blank"
-              rel="noreferrer"
-              title="Create a Jira API token, then add it to .env as JIRA_API_TOKEN"
-            >
-              Get Jira token
-            </a>
-          )}
-          <span className={`health ${health?.ok ? "ok" : "bad"}`}>
-            {health == null ? "…" : health.ok ? "Jira connected" : "Jira offline"}
-          </span>
         </div>
       </header>
 
@@ -687,37 +817,34 @@ export default function App() {
         />
         <button
           type="button"
-          className="gantt-btn primary"
+          className={`gantt-btn primary${busy === "pull" ? " is-busy" : ""}`}
           disabled={busy !== null || !jql.trim()}
           onClick={() => void onPull()}
         >
-          {busy === "pull" ? "Pulling…" : "Pull"}
+          {busy === "pull" ? (
+            <>
+              <span className="pg-spinner pg-spinner-inline" aria-hidden />
+              Pulling…
+            </>
+          ) : (
+            "Pull"
+          )}
         </button>
         <button
           type="button"
-          className={`gantt-btn${dirtyTasks.length ? " warn" : ""}`}
+          className={`gantt-btn${dirtyTasks.length ? " warn" : ""}${busy === "push" ? " is-busy" : ""}`}
           disabled={busy !== null || dirtyTasks.length === 0}
           onClick={() => void onPush()}
           title="Create draft tasks in Jira and write Start/Due/status for dirty items"
         >
-          {busy === "push" ? "Pushing…" : `Push${dirtyTasks.length ? ` (${dirtyTasks.length})` : ""}`}
-        </button>
-        <button
-          type="button"
-          className="gantt-btn"
-          disabled={!model.milestones.length}
-          onClick={() => setAddTaskOpen(true)}
-          title="Add a draft task under an epic — Push creates it in Jira"
-        >
-          + Task
-        </button>
-        <button
-          type="button"
-          className="gantt-btn"
-          onClick={() => setAddMsOpen(true)}
-          title="Add a top-level milestone (red star) — not synced to Jira"
-        >
-          + Milestone
+          {busy === "push" ? (
+            <>
+              <span className="pg-spinner pg-spinner-inline" aria-hidden />
+              Pushing…
+            </>
+          ) : (
+            `Push${dirtyTasks.length ? ` (${dirtyTasks.length})` : ""}`
+          )}
         </button>
         <label className="pg-field">
           Project start
@@ -739,6 +866,52 @@ export default function App() {
           />
           IL holidays
         </label>
+        <div className="pg-off-days" title="Manual non-working days — always apply">
+          <label className="pg-field pg-off-day-add">
+            Off day
+            <input
+              type="date"
+              value={offDayDate}
+              onChange={(e) => setOffDayDate(e.target.value)}
+            />
+            <input
+              type="text"
+              className="pg-off-day-name"
+              value={offDayName}
+              onChange={(e) => setOffDayName(e.target.value)}
+              placeholder="Label (optional)"
+              maxLength={40}
+            />
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={!offDayDate}
+              onClick={addCustomOffDay}
+            >
+              Add
+            </button>
+          </label>
+          {(model.customNonWorkingDays?.length ?? 0) > 0 && (
+            <div className="pg-off-day-list">
+              {model.customNonWorkingDays.map((d) => (
+                <span key={d.date} className="pg-off-day-chip" title={d.name || "Off day"}>
+                  <span className="pg-off-day-chip-text">
+                    {d.date}
+                    {d.name ? ` · ${d.name}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    className="pg-off-day-remove"
+                    onClick={() => removeCustomOffDay(d.date)}
+                    aria-label={`Remove off day ${d.date}`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
         <label className="pg-field pg-check" title="Prerequisite arrows from Jira Blocks links">
           <input
             type="checkbox"
@@ -776,6 +949,13 @@ export default function App() {
         model={model}
         jiraBaseUrl={jiraBaseUrl}
         initialScroll={scroll}
+        preview={previewOpen}
+        loading={busy}
+        loadingDetail={
+          busy === "push" && dirtyTasks.length
+            ? `${dirtyTasks.length} change${dirtyTasks.length === 1 ? "" : "s"}`
+            : null
+        }
         onScheduleEdit={onScheduleEdit}
         onStatusEdit={onStatusEdit}
         onToggleCollapse={onToggleCollapse}
@@ -790,6 +970,8 @@ export default function App() {
           setScroll(next);
           persistCache(modelRef.current, next);
         }}
+        onAddTask={() => setAddTaskOpen(true)}
+        onAddMilestone={() => setAddMsOpen(true)}
       />
 
       <AddTaskDialog
