@@ -1,6 +1,6 @@
 # Gantt Manager
 
-Local Jira-backed Gantt planner. **Jira is the source of truth** for tasks; the app pulls issues via JQL, lets you plan Start / Duration on a TeamGantt-style chart (Sun–Thu work week, IL holidays, prerequisites, resource hours), then **Push** writes only **Start date** + **Due date** back to Jira.
+Local Jira-backed Gantt planner. **Jira is the source of truth** for tasks; the app pulls issues via JQL, lets you plan Start / Duration / Status on a TeamGantt-style chart (Sun–Thu work week, IL holidays, prerequisites, resource hours), then **Push** writes **Start date**, **Due date**, and **status transitions** back to Jira.
 
 ## Setup
 
@@ -59,6 +59,22 @@ Then open http://localhost:8787.
 | Prerequisites | “Blocks” issue links (is blocked by) — read-only |
 | Assignee / Team | Display only |
 
-## Local state
+## Preferences file
 
-`gantt-state.json` (git-ignored) holds resources, allocations, collapsed epics, project start, and toggles.
+`preferences.json` (git-ignored, created automatically) stores your local prefs:
+
+- `jql` — autosaved as you type in the toolbar
+- `projectStart`, `showHolidays`, `showDeps`
+- layout: `leftPanelWidth`, `resourcesDockHeight`, `dayWidthPx` (drag the panel edges to resize)
+- `theme` — `"light"` | `"dark"` (toolbar toggle)
+- assignee colors / allocations, collapsed epics
+
+Copy [`preferences.example.json`](preferences.example.json) if you want a starter file. On first run, an older `gantt-state.json` is migrated to `preferences.json`.
+
+### Session restore
+
+`gantt-cache.json` (git-ignored) stores the last Gantt snapshot + scroll position. On refresh the app:
+
+1. Restores the cached view immediately
+2. Auto-Pulls from Jira when credentials work and JQL is set
+3. Skips auto-Pull if you have unpushed schedule edits (so you don’t lose them) — Push or Pull manually

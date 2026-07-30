@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import type { LocalState } from "../src/lib/types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const STATE_PATH = path.resolve(__dirname, "..", "gantt-state.json");
+const ROOT = path.resolve(__dirname, "..");
+const PREFS_PATH = path.resolve(ROOT, "preferences.json");
+const LEGACY_PATH = path.resolve(ROOT, "gantt-state.json");
 
 const DEFAULT_STATE: LocalState = {
   resources: [],
@@ -15,38 +17,65 @@ const DEFAULT_STATE: LocalState = {
   showDeps: true,
   dayWidthPx: 28,
   leftPanelWidth: 680,
+  resourcesDockHeight: 220,
   jql: process.env.JIRA_JQL || "",
   milestoneColors: {},
+  theme: "light",
 };
 
-export function readState(): LocalState {
+function migrateLegacyIfNeeded(): void {
+  if (fs.existsSync(PREFS_PATH) || !fs.existsSync(LEGACY_PATH)) return;
   try {
-    if (!fs.existsSync(STATE_PATH)) return { ...DEFAULT_STATE, jql: process.env.JIRA_JQL || "" };
-    const raw = JSON.parse(fs.readFileSync(STATE_PATH, "utf8")) as Partial<LocalState>;
-    return {
-      ...DEFAULT_STATE,
-      ...raw,
-      resources: raw.resources ?? [],
-      allocations: raw.allocations ?? {},
-      collapsed: raw.collapsed ?? {},
-      milestoneColors: raw.milestoneColors ?? {},
-      jql: raw.jql ?? process.env.JIRA_JQL ?? "",
-    };
+    fs.renameSync(LEGACY_PATH, PREFS_PATH);
+    console.log("Migrated gantt-state.json → preferences.json");
   } catch {
-    return { ...DEFAULT_STATE, jql: process.env.JIRA_JQL || "" };
+    try {
+      fs.copyFileSync(LEGACY_PATH, PREFS_PATH);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function normalize(raw: Partial<LocalState> | null | undefined): LocalState {
+  return {
+    ...DEFAULT_STATE,
+    ...(raw || {}),
+    resources: raw?.resources ?? [],
+    allocations: raw?.allocations ?? {},
+    collapsed: raw?.collapsed ?? {},
+    milestoneColors: raw?.milestoneColors ?? {},
+    jql: raw?.jql ?? process.env.JIRA_JQL ?? "",
+    projectStart: raw?.projectStart || DEFAULT_STATE.projectStart,
+    showHolidays: raw?.showHolidays !== false,
+    showDeps: raw?.showDeps !== false,
+    dayWidthPx: raw?.dayWidthPx || 28,
+    leftPanelWidth: raw?.leftPanelWidth || 680,
+    resourcesDockHeight: raw?.resourcesDockHeight || 220,
+    theme: raw?.theme === "dark" ? "dark" : "light",
+  };
+}
+
+export function prefsPath(): string {
+  return PREFS_PATH;
+}
+
+export function readState(): LocalState {
+  migrateLegacyIfNeeded();
+  try {
+    if (!fs.existsSync(PREFS_PATH)) {
+      return normalize({ jql: process.env.JIRA_JQL || "" });
+    }
+    const raw = JSON.parse(fs.readFileSync(PREFS_PATH, "utf8")) as Partial<LocalState>;
+    return normalize(raw);
+  } catch {
+    return normalize({ jql: process.env.JIRA_JQL || "" });
   }
 }
 
 export function writeState(state: LocalState): LocalState {
-  const next: LocalState = {
-    ...DEFAULT_STATE,
-    ...state,
-    resources: state.resources ?? [],
-    allocations: state.allocations ?? {},
-    collapsed: state.collapsed ?? {},
-    milestoneColors: state.milestoneColors ?? {},
-  };
-  fs.writeFileSync(STATE_PATH, JSON.stringify(next, null, 2) + "\n", "utf8");
+  const next = normalize(state);
+  fs.writeFileSync(PREFS_PATH, JSON.stringify(next, null, 2) + "\n", "utf8");
   return next;
 }
 

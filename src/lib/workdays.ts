@@ -136,6 +136,25 @@ export function dueFromStartDuration(
   return formatYmd(taskEnd(startYmd, durationDays, holidaysOn));
 }
 
+/** First calendar day of a task that ends on dueYmd after durationDays working days. */
+export function startFromDueDuration(
+  dueYmd: string | null,
+  durationDays: number,
+  holidaysOn: boolean,
+): string | null {
+  if (!dueYmd) return null;
+  const n = Math.max(1, Number(durationDays) || 1);
+  let cur = parseYmd(dueYmd);
+  let guard = 0;
+  while (isNonWorking(cur, holidaysOn) && guard++ < 370) cur = addDays(cur, -1);
+  let counted = 1;
+  while (counted < n && guard++ < 2000) {
+    cur = addDays(cur, -1);
+    if (!isNonWorking(cur, holidaysOn)) counted++;
+  }
+  return formatYmd(cur);
+}
+
 export function durationFromStartDue(
   startYmd: string | null,
   dueYmd: string | null,

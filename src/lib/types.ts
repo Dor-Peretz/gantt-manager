@@ -19,12 +19,27 @@ export interface GanttTask {
   estDays: number | null;
   resourceIds: string[];
   status: string;
+  /** Status name as of last Pull (to detect status edits) */
+  pulledStatus: string;
+  /** Jira transition id to apply on Push (when status changed) */
+  transitionId?: string | null;
   assignee: string | null;
   /** Issue keys this task is blocked by (prerequisites) */
   blockedBy: string[];
   /** Jira updated ISO timestamp at last pull (for optimistic lock) */
   jiraUpdated: string;
+  /** True when start/duration differ from last pull and need Push */
+  scheduleDirty?: boolean;
+  /** True when a status transition is pending Push */
+  statusDirty?: boolean;
+  /** Convenience: scheduleDirty || statusDirty */
   dirty?: boolean;
+}
+
+export interface StatusTransition {
+  id: string;
+  name: string;
+  to: { id: string; name: string };
 }
 
 export interface Milestone {
@@ -40,6 +55,8 @@ export interface GanttModel {
   projectStart: string;
   dayWidthPx: number;
   leftPanelWidth: number;
+  /** Height of the pinned Resources dock (px) */
+  resourcesDockHeight: number;
   hoursPerDay: number;
   showHolidays: boolean;
   showDeps: boolean;
@@ -48,6 +65,8 @@ export interface GanttModel {
   milestones: Milestone[];
   pulledAt: string | null;
 }
+
+export type ThemeMode = "light" | "dark";
 
 export interface LocalState {
   resources: Resource[];
@@ -60,8 +79,10 @@ export interface LocalState {
   showDeps: boolean;
   dayWidthPx: number;
   leftPanelWidth: number;
+  resourcesDockHeight: number;
   jql: string;
   milestoneColors: Record<string, string>;
+  theme: ThemeMode;
 }
 
 export interface PushItem {
@@ -69,6 +90,9 @@ export interface PushItem {
   start: string | null;
   due: string | null;
   jiraUpdated: string;
+  /** When set, Push will transition the issue to this status */
+  transitionId?: string | null;
+  status?: string | null;
 }
 
 export interface PushResult {
@@ -78,6 +102,7 @@ export interface PushResult {
   jiraUpdated?: string;
 }
 
+/** Distinct palette for Jira assignees (task bars + resource rows). */
 export const DEFAULT_COLORS = [
   "#17A0E0",
   "#22C55E",
@@ -87,7 +112,17 @@ export const DEFAULT_COLORS = [
   "#06B6D4",
   "#EC4899",
   "#0E80C4",
+  "#84CC16",
+  "#F97316",
+  "#6366F1",
+  "#14B8A6",
+  "#E11D48",
+  "#8B5CF6",
+  "#0EA5E9",
+  "#CA8A04",
 ];
+
+export const UNASSIGNED_COLOR = "#94A3B8";
 
 export const MILESTONE_COLORS: Record<string, string> = {
   M1: "#17A0E0",
@@ -103,6 +138,7 @@ export function emptyModel(jql = ""): GanttModel {
     projectStart: new Date().toISOString().slice(0, 10),
     dayWidthPx: 28,
     leftPanelWidth: 680,
+    resourcesDockHeight: 220,
     hoursPerDay: 8,
     showHolidays: true,
     showDeps: true,

@@ -4,10 +4,37 @@ import type {
   Milestone,
   PushItem,
   PushResult,
+  Resource,
 } from "../src/lib/types.ts";
 import { DEFAULT_COLORS, MILESTONE_COLORS } from "../src/lib/types.ts";
-import { durationFromStartDue } from "../src/lib/workdays.ts";
-import { readState } from "./state.ts";
+import {
+  dueFromStartDuration,
+  durationFromStartDue,
+  initialsFromName,
+  startFromDueDuration,
+} from "../src/lib/workdays.ts";
+import { mergeState, readState } from "./state.ts";
+
+function hash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+function colorForAssignee(accountId: string, used: Set<string>): string {
+  // Stable preferred slot from account id, then walk the palette for uniqueness
+  const idx = Math.abs(hash(accountId)) % DEFAULT_COLORS.length;
+  for (let i = 0; i < DEFAULT_COLORS.length; i++) {
+    const c = DEFAULT_COLORS[(idx + i) % DEFAULT_COLORS.length];
+    if (!used.has(c)) {
+      used.add(c);
+      return c;
+    }
+  }
+  const fallback = DEFAULT_COLORS[idx];
+  used.add(fallback);
+  return fallback;
+}
 
 const FALLBACK_FIELDS = {
   startDate: "customfield_10907",
@@ -98,12 +125,6 @@ function milestoneColor(epicKey: string, summary: string, overrides: Record<stri
   return DEFAULT_COLORS[idx];
 }
 
-function hash(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return h;
-}
-
 function blockedByKeys(fields: Record<string, unknown>): string[] {
   const links = (fields.issuelinks as Array<Record<string, unknown>>) || [];
   const keys: string[] = [];
@@ -123,6 +144,81 @@ function ownerLabel(fields: Record<string, unknown>, fieldMap: FieldMap): string
   const components = (fields.components as Array<{ name: string }>) || [];
   for (const c of components) if (c.name) parts.push(c.name);
   return parts.join(" · ") || "—";
+}
+
+/** Resolve start/due/duration from Jira dates + story-point estimate. */
+function scheduleFromFields(
+  start: string | null,
+  due: string | null,
+  sp: number | null,
+  holidaysOn: boolean,
+): { start: string | null; due: string | null; durationDays: number; estDays: number | null } {
+  const estDays = typeof sp === "number" && Number.isFinite(sp) ? sp : null;
+  const estDur = estDays != null ? Math.max(1, Math.round(estDays)) : null;
+
+  if (start && due) {
+    return {
+      start,
+      due,
+      durationDays: durationFromStartDue(start, due, holidaysOn),
+      estDays,
+    };
+  }
+  if (start && estDur != null) {
+    return {
+      start,
+      due: dueFromStartDuration(start, estDur, holidaysOn),
+      durationDays: estDur,
+      estDays,
+    };
+  }
+  if (due && estDur != null) {
+    return {
+      start: startFromDueDuration(due, estDur, holidaysOn),
+      due,
+      durationDays: estDur,
+      estDays,
+    };
+  }
+  if (start) return { start, due, durationDays: 1, estDays };
+  if (due) return { start: null, due, durationDays: estDur ?? 1, estDays };
+  if (estDur != null) return { start: null, due: null, durationDays: estDur, estDays };
+  return { start: null, due: null, durationDays: 1, estDays: null };
+}
+
+function taskFromIssue(
+  issue: JiraIssue,
+  fieldMap: FieldMap,
+  holidaysOn: boolean,
+  resourceId: string | null,
+): GanttTask {
+  const f = issue.fields;
+  const { friendlyId, title } = parseSummary(String(f.summary || ""));
+  const startRaw = (f[fieldMap.startDate] as string | null) || null;
+  const dueRaw = (f.duedate as string | null) || null;
+  const sp = f[fieldMap.storyPoints] as number | null;
+  const schedule = scheduleFromFields(startRaw, dueRaw, sp, holidaysOn);
+  const assignee = f.assignee as { accountId?: string; displayName?: string } | null;
+  const status = (f.status as { name?: string } | null)?.name || "—";
+
+  return {
+    id: issue.key,
+    friendlyId: friendlyId || issue.key,
+    title,
+    owner: ownerLabel(f, fieldMap),
+    start: schedule.start,
+    due: schedule.due,
+    durationDays: schedule.durationDays,
+    estDays: schedule.estDays,
+    resourceIds: resourceId ? [resourceId] : [],
+    status,
+    pulledStatus: status,
+    transitionId: null,
+    assignee: assignee?.displayName || null,
+    blockedBy: blockedByKeys(f),
+    jiraUpdated: String(f.updated || ""),
+    dirty: false,
+  };
 }
 
 async function searchAll(jql: string, fields: string[]): Promise<JiraIssue[]> {
@@ -225,70 +321,119 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
 
   const issues = await searchAll(jql, fields);
 
-  // Exclude epics themselves from task rows; group children under parent/epic
+  // Group stories under parent epic. Childless epics use their own start/due/estimate.
   const tasksByEpic = new Map<string, GanttTask[]>();
   const epicKeysNeeded: string[] = [];
+  const epicSummaries = new Map<string, string>();
+  const epicIssues = new Map<string, JiraIssue>();
+  const resourceById = new Map<string, Resource>();
+  const prevColor = new Map((local.resources || []).map((r) => [r.id, r.color]));
+  const usedColors = new Set<string>([...prevColor.values()]);
+
+  function ensureEpic(epicKey: string, summary?: string) {
+    if (!tasksByEpic.has(epicKey)) tasksByEpic.set(epicKey, []);
+    if (summary) epicSummaries.set(epicKey, summary);
+  }
+
+  function resourceFromAssignee(assignee: {
+    accountId?: string;
+    displayName?: string;
+  } | null): string | null {
+    if (!assignee?.accountId) return null;
+    const id = `jira:${assignee.accountId}`;
+    if (!resourceById.has(id)) {
+      const name = assignee.displayName || assignee.accountId;
+      const color = prevColor.get(id) || colorForAssignee(assignee.accountId, usedColors);
+      if (prevColor.has(id)) usedColors.add(color);
+      resourceById.set(id, {
+        id,
+        name,
+        team: "Jira assignee",
+        color,
+        initials: initialsFromName(name),
+      });
+    }
+    return id;
+  }
 
   for (const issue of issues) {
     const f = issue.fields;
     const type = f.issuetype as { name?: string; hierarchyLevel?: number } | undefined;
-    if (type?.name === "Epic" || type?.hierarchyLevel === 1) continue;
+    const hierarchy = type?.hierarchyLevel ?? 0;
+    const isEpic = type?.name === "Epic" || hierarchy === 1;
+
+    // Epics: milestone rows. Schedule comes from children, or the epic itself if none.
+    // Initiatives / higher hierarchy: skip (not task rows).
+    if (hierarchy >= 1) {
+      if (isEpic) {
+        ensureEpic(issue.key, String(f.summary || issue.key));
+        epicIssues.set(issue.key, issue);
+      }
+      continue;
+    }
 
     const parent = f.parent as { key?: string; fields?: { summary?: string } } | null;
     const epicLink = f[fieldMap.epicLink] as string | null;
     const epicKey = parent?.key || epicLink || "_ungrouped";
-    if (epicKey !== "_ungrouped") epicKeysNeeded.push(epicKey);
+    if (epicKey !== "_ungrouped") {
+      epicKeysNeeded.push(epicKey);
+      if (parent?.fields?.summary) epicSummaries.set(epicKey, parent.fields.summary);
+    }
 
-    const { friendlyId, title } = parseSummary(String(f.summary || ""));
-    const start = (f[fieldMap.startDate] as string | null) || null;
-    const due = (f.duedate as string | null) || null;
-    const durationDays = durationFromStartDue(start, due, holidaysOn);
-    const sp = f[fieldMap.storyPoints] as number | null;
-    const assignee = f.assignee as { displayName?: string } | null;
-    const status = (f.status as { name?: string } | null)?.name || "—";
+    const assignee = f.assignee as {
+      accountId?: string;
+      displayName?: string;
+    } | null;
+    const resourceId = resourceFromAssignee(assignee);
+    const task = taskFromIssue(issue, fieldMap, holidaysOn, resourceId);
 
-    const task: GanttTask = {
-      id: issue.key,
-      friendlyId: friendlyId || issue.key,
-      title,
-      owner: ownerLabel(f, fieldMap),
-      start,
-      due,
-      durationDays,
-      estDays: typeof sp === "number" ? sp : null,
-      resourceIds: local.allocations[issue.key] || [],
-      status,
-      assignee: assignee?.displayName || null,
-      blockedBy: blockedByKeys(f),
-      jiraUpdated: String(f.updated || ""),
-      dirty: false,
-    };
-
-    if (!tasksByEpic.has(epicKey)) tasksByEpic.set(epicKey, []);
+    ensureEpic(epicKey);
     tasksByEpic.get(epicKey)!.push(task);
   }
 
-  const epicSummaries = await fetchEpicSummaries(epicKeysNeeded);
-  // Prefer parent.fields.summary when present in search results
-  for (const issue of issues) {
-    const parent = issue.fields.parent as { key?: string; fields?: { summary?: string } } | null;
-    if (parent?.key && parent.fields?.summary) epicSummaries.set(parent.key, parent.fields.summary);
+  // Childless epics: use the epic's own start/due/story points as a schedule task.
+  for (const [epicKey, tasks] of tasksByEpic) {
+    if (tasks.length > 0) continue;
+    const epicIssue = epicIssues.get(epicKey);
+    if (!epicIssue) continue;
+    const f = epicIssue.fields;
+    const start = (f[fieldMap.startDate] as string | null) || null;
+    const due = (f.duedate as string | null) || null;
+    const sp = f[fieldMap.storyPoints] as number | null;
+    if (!start && !due && !(typeof sp === "number" && Number.isFinite(sp))) continue;
+    const assignee = f.assignee as {
+      accountId?: string;
+      displayName?: string;
+    } | null;
+    const resourceId = resourceFromAssignee(assignee);
+    tasks.push(taskFromIssue(epicIssue, fieldMap, holidaysOn, resourceId));
+  }
+
+  // Fill titles for epics that only appeared as parents of stories
+  const missingTitles = epicKeysNeeded.filter((k) => !epicSummaries.has(k));
+  if (missingTitles.length) {
+    const fetched = await fetchEpicSummaries(missingTitles);
+    for (const [k, v] of fetched) epicSummaries.set(k, v);
   }
 
   const milestones: Milestone[] = [];
   for (const [epicKey, tasks] of tasksByEpic) {
+    if (epicKey === "_ungrouped" && tasks.length === 0) continue;
     const summary = epicSummaries.get(epicKey) || epicKey;
+    // Epic self-schedule task shares the epic key — don't nest a duplicate row under it.
+    const childTasks = tasks.filter((t) => t.id !== epicKey);
+    const scheduleTasks = childTasks.length ? childTasks : tasks;
     milestones.push({
       id: epicKey,
       title: summary,
       color: milestoneColor(epicKey, summary, local.milestoneColors),
-      collapsed: !!local.collapsed[epicKey],
-      tasks,
+      collapsed: local.collapsed[epicKey] ?? false,
+      tasks: scheduleTasks,
     });
   }
 
-  // Stable order: by first task start, then key
-  milestones.sort((a, b) => a.id.localeCompare(b.id));
+  // Prefer human titles (M0/M1/M2…) over raw keys
+  milestones.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
 
   const projectStart =
     local.projectStart ||
@@ -297,19 +442,58 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       .sort()[0] ||
     new Date().toISOString().slice(0, 10);
 
+  const resources = [...resourceById.values()].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  const allocations: Record<string, string[]> = {};
+  for (const m of milestones) {
+    for (const t of m.tasks) allocations[t.id] = t.resourceIds;
+  }
+  // Persist Jira-derived roster (colors) so they stay stable across pulls
+  mergeState({ resources, allocations, jql });
+
   return {
     title: "Jira Gantt",
     projectStart,
     dayWidthPx: local.dayWidthPx || 28,
     leftPanelWidth: local.leftPanelWidth || 680,
+    resourcesDockHeight: local.resourcesDockHeight || 220,
     hoursPerDay: 8,
     showHolidays: local.showHolidays !== false,
     showDeps: local.showDeps !== false,
     jql,
-    resources: local.resources || [],
+    resources,
     milestones,
     pulledAt: new Date().toISOString(),
   };
+}
+
+export interface JiraTransition {
+  id: string;
+  name: string;
+  to: { id: string; name: string };
+}
+
+export async function getTransitions(issueKey: string): Promise<JiraTransition[]> {
+  const res = await jiraFetch(
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`,
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`transitions failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as {
+    transitions?: Array<{
+      id: string;
+      name: string;
+      to?: { id?: string; name?: string };
+    }>;
+  };
+  return (data.transitions || []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    to: { id: t.to?.id || "", name: t.to?.name || t.name },
+  }));
 }
 
 export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
@@ -324,7 +508,7 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
     try {
       // Optimistic lock: re-fetch updated
       const getRes = await jiraFetch(
-        `/rest/api/3/issue/${encodeURIComponent(item.key)}?fields=updated`,
+        `/rest/api/3/issue/${encodeURIComponent(item.key)}?fields=updated,status`,
       );
       if (!getRes.ok) {
         results.push({
@@ -334,7 +518,9 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
         });
         continue;
       }
-      const current = (await getRes.json()) as { fields: { updated: string } };
+      const current = (await getRes.json()) as {
+        fields: { updated: string; status?: { name?: string } };
+      };
       const remoteUpdated = current.fields.updated;
       if (item.jiraUpdated && remoteUpdated && remoteUpdated !== item.jiraUpdated) {
         results.push({
@@ -359,18 +545,39 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
         results.push({
           key: item.key,
           status: "error",
-          message: `update failed (${putRes.status}): ${text.slice(0, 300)}`,
+          message: `schedule update failed (${putRes.status}): ${text.slice(0, 300)}`,
         });
         continue;
       }
 
-      // Re-read updated stamp
+      if (item.transitionId) {
+        const trRes = await jiraFetch(
+          `/rest/api/3/issue/${encodeURIComponent(item.key)}/transitions`,
+          {
+            method: "POST",
+            body: JSON.stringify({ transition: { id: item.transitionId } }),
+          },
+        );
+        if (!trRes.ok && trRes.status !== 204) {
+          const text = await trRes.text();
+          results.push({
+            key: item.key,
+            status: "error",
+            message: `status transition failed (${trRes.status}): ${text.slice(0, 300)}`,
+          });
+          continue;
+        }
+      }
+
+      // Re-read updated stamp + status
       const afterRes = await jiraFetch(
-        `/rest/api/3/issue/${encodeURIComponent(item.key)}?fields=updated`,
+        `/rest/api/3/issue/${encodeURIComponent(item.key)}?fields=updated,status`,
       );
       let jiraUpdated = remoteUpdated;
       if (afterRes.ok) {
-        const after = (await afterRes.json()) as { fields: { updated: string } };
+        const after = (await afterRes.json()) as {
+          fields: { updated: string; status?: { name?: string } };
+        };
         jiraUpdated = after.fields.updated;
       }
       results.push({ key: item.key, status: "ok", jiraUpdated });

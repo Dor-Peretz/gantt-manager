@@ -1,9 +1,89 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchConfig, fetchHealth, pullGantt, pushGantt, saveState } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  fetchConfig,
+  fetchHealth,
+  loadCache,
+  pullGantt,
+  pushGantt,
+  saveCache,
+  saveState,
+  type ScrollState,
+} from "./api";
 import { GanttBoard } from "./gantt/GanttBoard";
-import type { GanttModel, GanttTask, PushResult, Resource } from "./lib/types";
+import type { GanttModel, GanttTask, LocalState, PushResult, ThemeMode } from "./lib/types";
 import { emptyModel } from "./lib/types";
 import { dueFromStartDuration } from "./lib/workdays";
+
+function applyTheme(theme: ThemeMode) {
+  document.documentElement.setAttribute("data-theme", theme);
+}
+
+function countDirty(m: GanttModel): number {
+  let n = 0;
+  for (const ms of m.milestones) for (const t of ms.tasks) if (t.dirty) n++;
+  return n;
+}
+
+function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalState> {
+  const allocations: Record<string, string[]> = {};
+  const collapsed: Record<string, boolean> = {};
+  const milestoneColors: Record<string, string> = {};
+  for (const m of next.milestones) {
+    collapsed[m.id] = !!m.collapsed;
+    milestoneColors[m.id] = m.color;
+    for (const t of m.tasks) allocations[t.id] = t.resourceIds;
+  }
+  return {
+    resources: next.resources,
+    allocations,
+    collapsed,
+    milestoneColors,
+    projectStart: next.projectStart,
+    showHolidays: next.showHolidays,
+    showDeps: next.showDeps,
+    dayWidthPx: next.dayWidthPx,
+    leftPanelWidth: next.leftPanelWidth,
+    resourcesDockHeight: next.resourcesDockHeight,
+    jql: jqlOverride ?? next.jql,
+  };
+}
+
+/** Keep local unpushed schedule/status edits + epic colors/collapse when a fresh Pull arrives. */
+function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel {
+  const dirtyById = new Map<string, GanttTask>();
+  const prevById = new Map(previous.milestones.map((m) => [m.id, m]));
+  for (const m of previous.milestones) {
+    for (const t of m.tasks) if (t.dirty) dirtyById.set(t.id, t);
+  }
+  return {
+    ...fresh,
+    milestones: fresh.milestones.map((m) => {
+      const prev = prevById.get(m.id);
+      return {
+        ...m,
+        collapsed: prev?.collapsed ?? m.collapsed,
+        color: prev?.color ?? m.color,
+        tasks: m.tasks.map((t) => {
+          const d = dirtyById.get(t.id);
+          if (!d) return t;
+          return {
+            ...t,
+            start: d.scheduleDirty ? d.start : t.start,
+            due: d.scheduleDirty ? d.due : t.due,
+            durationDays: d.scheduleDirty ? d.durationDays : t.durationDays,
+            status: d.statusDirty ? d.status : t.status,
+            pulledStatus: t.pulledStatus || t.status,
+            transitionId: d.statusDirty ? d.transitionId ?? null : null,
+            scheduleDirty: !!d.scheduleDirty,
+            statusDirty: !!d.statusDirty,
+            dirty: !!(d.scheduleDirty || d.statusDirty),
+            jiraUpdated: t.jiraUpdated,
+          };
+        }),
+      };
+    }),
+  };
+}
 
 export default function App() {
   const [model, setModel] = useState<GanttModel>(() => emptyModel());
@@ -17,23 +97,151 @@ export default function App() {
   const [hint, setHint] = useState("Enter JQL and press Pull to load Jira tasks.");
   const [pushResults, setPushResults] = useState<PushResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [prefsSavedAt, setPrefsSavedAt] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>("light");
+  const [scroll, setScroll] = useState<ScrollState | null>(null);
+  const jqlTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cacheTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelRef = useRef(model);
+  const scrollRef = useRef<ScrollState | null>(null);
+  modelRef.current = model;
+  scrollRef.current = scroll;
+  const booted = useRef(false);
+
+  const persistCache = useCallback((nextModel: GanttModel, nextScroll?: ScrollState | null) => {
+    if (!nextModel.milestones.length) return;
+    if (cacheTimer.current) clearTimeout(cacheTimer.current);
+    cacheTimer.current = setTimeout(() => {
+      void saveCache({
+        model: nextModel,
+        scroll: nextScroll || scrollRef.current || { tasksLeft: 0, tasksTop: 0, resLeft: 0 },
+        savedAt: new Date().toISOString(),
+      }).catch(() => undefined);
+    }, 300);
+  }, []);
+
+  const persistLocal = useCallback(async (partial: Partial<LocalState>) => {
+    try {
+      await saveState(partial);
+      setPrefsSavedAt(new Date().toLocaleTimeString());
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
+  const runPull = useCallback(
+    async (jqlValue: string, opts?: { silent?: boolean; previous?: GanttModel }) => {
+      const q = jqlValue.trim();
+      if (!q) return;
+      setBusy("pull");
+      setError(null);
+      setPushResults(null);
+      if (!opts?.silent) setStatus("Pulling from Jira…");
+      try {
+        let next = await pullGantt(q);
+        if (opts?.previous) next = mergeDirtySchedule(next, opts.previous);
+        setModel(next);
+        setJql(next.jql);
+        await persistLocal(prefsFromModel(next, next.jql));
+        persistCache(next, scrollRef.current);
+        const count = next.milestones.reduce((n, m) => n + m.tasks.length, 0);
+        const dirty = countDirty(next);
+        setStatus(
+          dirty
+            ? `Pulled ${count} tasks · kept ${dirty} local edit(s)`
+            : `Pulled ${count} tasks · ${next.milestones.length} epics`,
+        );
+        setHint(`Last pull ${new Date(next.pulledAt || Date.now()).toLocaleString()}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        setStatus("Pull failed");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [persistLocal, persistCache],
+  );
 
   useEffect(() => {
+    if (booted.current) return;
+    booted.current = true;
     void (async () => {
       try {
-        const [cfg, h] = await Promise.all([fetchConfig(), fetchHealth()]);
-        setJql(cfg.jql || "");
+        const [cfg, h, cache] = await Promise.all([
+          fetchConfig(),
+          fetchHealth(),
+          loadCache(),
+        ]);
+        const prefs = cfg.preferences;
+        const savedJql = prefs?.jql || cfg.jql || cache?.model.jql || "";
+        const savedTheme: ThemeMode = prefs?.theme === "dark" ? "dark" : "light";
+        setJql(savedJql);
+        setTheme(savedTheme);
+        applyTheme(savedTheme);
         if (cfg.baseUrl) setJiraBaseUrl(cfg.baseUrl.replace(/\/$/, ""));
-        setModel((m) => ({ ...m, jql: cfg.jql || m.jql }));
+
+        let restored: GanttModel | null = null;
+        if (cache?.model?.milestones?.length) {
+          restored = {
+            ...cache.model,
+            jql: savedJql || cache.model.jql,
+            projectStart: prefs?.projectStart || cache.model.projectStart,
+            showHolidays: prefs?.showHolidays !== false,
+            showDeps: prefs?.showDeps !== false,
+            dayWidthPx: prefs?.dayWidthPx || cache.model.dayWidthPx,
+            leftPanelWidth: prefs?.leftPanelWidth || cache.model.leftPanelWidth,
+            resourcesDockHeight:
+              prefs?.resourcesDockHeight || cache.model.resourcesDockHeight || 220,
+          };
+          setModel(restored);
+          if (cache.scroll) setScroll(cache.scroll);
+          const count = restored.milestones.reduce((n, m) => n + m.tasks.length, 0);
+          setStatus(`Restored ${count} tasks from last session`);
+          setHint(
+            cache.savedAt
+              ? `Restored view from ${new Date(cache.savedAt).toLocaleString()}`
+              : "Restored last session",
+          );
+        } else {
+          setModel((m) => ({
+            ...m,
+            jql: savedJql,
+            projectStart: prefs?.projectStart || m.projectStart,
+            showHolidays: prefs?.showHolidays !== false,
+            showDeps: prefs?.showDeps !== false,
+            dayWidthPx: prefs?.dayWidthPx || m.dayWidthPx,
+            leftPanelWidth: prefs?.leftPanelWidth || m.leftPanelWidth,
+            resourcesDockHeight: prefs?.resourcesDockHeight || m.resourcesDockHeight,
+            resources: prefs?.resources || [],
+          }));
+        }
+
         setHealth(h);
-        if (!h.ok) setHint(h.error || "Jira auth not configured — fill in .env");
-        else setHint(`Connected: ${h.site}`);
+        if (!h.ok) {
+          setHint(h.error || "Jira auth not configured — fill in .env");
+          return;
+        }
+
+        if (savedJql) {
+          const dirty = restored ? countDirty(restored) : 0;
+          if (dirty > 0) {
+            setHint(
+              `Connected: ${h.site} · ${dirty} unpushed edit(s) — skipped auto-pull. Push or Pull manually.`,
+            );
+          } else {
+            setHint(`Connected: ${h.site} · refreshing from Jira…`);
+            await runPull(savedJql, { silent: true, previous: restored || undefined });
+          }
+        } else {
+          setHint(`Connected: ${h.site} · enter JQL and Pull`);
+        }
       } catch (err) {
         setHealth({ ok: false, error: err instanceof Error ? err.message : String(err) });
         setHint("Server not reachable. Run `npm run dev`.");
       }
     })();
-  }, []);
+  }, [runPull]);
 
   const dirtyTasks = useMemo(() => {
     const out: GanttTask[] = [];
@@ -41,64 +249,36 @@ export default function App() {
     return out;
   }, [model.milestones]);
 
-  const persistLocal = useCallback(
-    async (next: GanttModel) => {
-      const allocations: Record<string, string[]> = {};
-      const collapsed: Record<string, boolean> = {};
-      for (const m of next.milestones) {
-        collapsed[m.id] = !!m.collapsed;
-        for (const t of m.tasks) allocations[t.id] = t.resourceIds;
-      }
-      try {
-        await saveState({
-          resources: next.resources,
-          allocations,
-          collapsed,
-          projectStart: next.projectStart,
-          showHolidays: next.showHolidays,
-          showDeps: next.showDeps,
-          dayWidthPx: next.dayWidthPx,
-          leftPanelWidth: next.leftPanelWidth,
-          jql: next.jql,
-        });
-      } catch {
-        /* non-fatal */
-      }
-    },
-    [],
-  );
+  function toggleTheme() {
+    const next: ThemeMode = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    applyTheme(next);
+    void persistLocal({ theme: next });
+  }
 
   const updateModel = useCallback(
     (updater: (prev: GanttModel) => GanttModel) => {
       setModel((prev) => {
         const next = updater(prev);
-        void persistLocal(next);
+        void persistLocal(prefsFromModel(next, jql));
+        persistCache(next, scrollRef.current);
         return next;
       });
     },
-    [persistLocal],
+    [persistLocal, persistCache, jql],
   );
 
+  function onJqlChange(value: string) {
+    setJql(value);
+    setModel((m) => ({ ...m, jql: value }));
+    if (jqlTimer.current) clearTimeout(jqlTimer.current);
+    jqlTimer.current = setTimeout(() => {
+      void persistLocal({ jql: value });
+    }, 400);
+  }
+
   async function onPull() {
-    setBusy("pull");
-    setError(null);
-    setPushResults(null);
-    setStatus("Pulling from Jira…");
-    try {
-      const next = await pullGantt(jql.trim());
-      setModel(next);
-      setJql(next.jql);
-      await persistLocal(next);
-      const count = next.milestones.reduce((n, m) => n + m.tasks.length, 0);
-      setStatus(`Pulled ${count} tasks · ${next.milestones.length} epics`);
-      setHint(`Last pull ${new Date(next.pulledAt || Date.now()).toLocaleString()}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-      setStatus("Pull failed");
-    } finally {
-      setBusy(null);
-    }
+    await runPull(jql, { previous: modelRef.current });
   }
 
   async function onPush() {
@@ -113,6 +293,8 @@ export default function App() {
           start: t.start,
           due: t.due,
           jiraUpdated: t.jiraUpdated,
+          transitionId: t.transitionId || null,
+          status: t.status,
         })),
       );
       setPushResults(results);
@@ -124,7 +306,15 @@ export default function App() {
             const r = results.find((x) => x.key === t.id);
             if (!r) return t;
             if (r.status === "ok") {
-              return { ...t, dirty: false, jiraUpdated: r.jiraUpdated || t.jiraUpdated };
+              return {
+                ...t,
+                dirty: false,
+                scheduleDirty: false,
+                statusDirty: false,
+                transitionId: null,
+                pulledStatus: t.status,
+                jiraUpdated: r.jiraUpdated || t.jiraUpdated,
+              };
             }
             return t;
           }),
@@ -150,7 +340,12 @@ export default function App() {
         ...m,
         tasks: m.tasks.map((t) => {
           if (t.id !== taskId) return t;
-          const next = { ...t, ...patch, dirty: true };
+          const next = {
+            ...t,
+            ...patch,
+            scheduleDirty: true,
+            dirty: true,
+          };
           if (patch.start !== undefined || patch.durationDays !== undefined) {
             next.due = dueFromStartDuration(
               next.start,
@@ -165,6 +360,34 @@ export default function App() {
     setStatus("Unsaved schedule changes");
   }
 
+  function onStatusEdit(
+    taskId: string,
+    next: { status: string; transitionId: string | null },
+  ) {
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks.map((t) => {
+          if (t.id !== taskId) return t;
+          const statusDirty = !!next.transitionId;
+          return {
+            ...t,
+            status: next.status,
+            transitionId: next.transitionId,
+            statusDirty,
+            dirty: !!(t.scheduleDirty || statusDirty),
+          };
+        }),
+      })),
+    }));
+    setStatus(
+      next.transitionId
+        ? "Unsaved status change — Push to update Jira"
+        : "Status reset to Jira value",
+    );
+  }
+
   function onToggleCollapse(milestoneId: string) {
     updateModel((prev) => ({
       ...prev,
@@ -174,32 +397,14 @@ export default function App() {
     }));
   }
 
-  function onAllocations(taskId: string, resourceIds: string[]) {
+  function onMilestoneColorChange(milestoneId: string, color: string) {
     updateModel((prev) => ({
       ...prev,
-      milestones: prev.milestones.map((m) => ({
-        ...m,
-        tasks: m.tasks.map((t) => (t.id === taskId ? { ...t, resourceIds } : t)),
-      })),
+      milestones: prev.milestones.map((m) =>
+        m.id === milestoneId ? { ...m, color } : m,
+      ),
     }));
-  }
-
-  function onAddResource(r: Resource) {
-    updateModel((prev) => ({ ...prev, resources: [...prev.resources, r] }));
-  }
-
-  function onRemoveResource(id: string) {
-    updateModel((prev) => ({
-      ...prev,
-      resources: prev.resources.filter((r) => r.id !== id),
-      milestones: prev.milestones.map((m) => ({
-        ...m,
-        tasks: m.tasks.map((t) => ({
-          ...t,
-          resourceIds: t.resourceIds.filter((x) => x !== id),
-        })),
-      })),
-    }));
+    setStatus("Epic color saved");
   }
 
   return (
@@ -207,21 +412,33 @@ export default function App() {
       <header className="app-header">
         <h1>Gantt Manager</h1>
         <p className="sub">
-          Jira is the source of truth. Pull tasks, plan the schedule, then Push Start date + Due
-          date back.
+          Jira is the source of truth. Resources = assignees. Pull tasks, plan the schedule, then
+          Push Start date + Due date back.
         </p>
-        <span className={`health ${health?.ok ? "ok" : "bad"}`}>
-          {health == null ? "…" : health.ok ? "Jira connected" : "Jira offline"}
-        </span>
+        <div className="app-header-actions">
+          <button
+            type="button"
+            className="gantt-btn theme-toggle"
+            onClick={toggleTheme}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
+          <span className={`health ${health?.ok ? "ok" : "bad"}`}>
+            {health == null ? "…" : health.ok ? "Jira connected" : "Jira offline"}
+          </span>
+        </div>
       </header>
 
       <div className="pg-toolbar">
         <input
           className="pg-jql"
           value={jql}
-          onChange={(e) => setJql(e.target.value)}
+          onChange={(e) => onJqlChange(e.target.value)}
           placeholder='JQL — e.g. project = SBT AND parent = SBT-61018'
           spellCheck={false}
+          title="Saved to preferences.json as you type"
         />
         <button
           type="button"
@@ -270,6 +487,11 @@ export default function App() {
         </label>
         <p className="hint">{hint}</p>
         <span className={`status${dirtyTasks.length ? " dirty" : ""}`}>{status}</span>
+        {prefsSavedAt && (
+          <span className="status" title="Written to preferences.json">
+            Prefs saved {prefsSavedAt}
+          </span>
+        )}
       </div>
 
       {error && (
@@ -291,12 +513,16 @@ export default function App() {
       <GanttBoard
         model={model}
         jiraBaseUrl={jiraBaseUrl}
-        onModelChange={setModel}
+        initialScroll={scroll}
         onScheduleEdit={onScheduleEdit}
+        onStatusEdit={onStatusEdit}
         onToggleCollapse={onToggleCollapse}
-        onAllocations={onAllocations}
-        onAddResource={onAddResource}
-        onRemoveResource={onRemoveResource}
+        onMilestoneColorChange={onMilestoneColorChange}
+        onLayoutChange={(patch) => updateModel((prev) => ({ ...prev, ...patch }))}
+        onScrollChange={(next) => {
+          setScroll(next);
+          persistCache(modelRef.current, next);
+        }}
       />
 
       <div className="pg-legend">
@@ -321,7 +547,7 @@ export default function App() {
         <span>
           <i className="m-dep" /> Prerequisite
         </span>
-        <span>Push writes only Start date + Due date to Jira</span>
+        <span>Push writes Start date, Due date, and status transitions to Jira</span>
       </div>
     </div>
   );

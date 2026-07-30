@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+preferences.json
+gantt-cache.json
 gantt-state.json
 *.log
 .DS_Store

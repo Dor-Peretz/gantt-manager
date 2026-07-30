@@ -1,4 +1,22 @@
-import type { GanttModel, LocalState, PushItem, PushResult } from "./lib/types";
+import type {
+  GanttModel,
+  LocalState,
+  PushItem,
+  PushResult,
+  StatusTransition,
+} from "./lib/types";
+
+export interface ScrollState {
+  tasksLeft: number;
+  tasksTop: number;
+  resLeft: number;
+}
+
+export interface GanttCache {
+  model: GanttModel;
+  scroll: ScrollState;
+  savedAt: string;
+}
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -14,7 +32,12 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function fetchConfig(): Promise<{ jql: string; baseUrl: string }> {
+export async function fetchConfig(): Promise<{
+  jql: string;
+  baseUrl: string;
+  prefsFile?: string;
+  preferences?: import("./lib/types").LocalState;
+}> {
   return json(await fetch("/api/config"));
 }
 
@@ -49,4 +72,26 @@ export async function saveState(partial: Partial<LocalState>): Promise<LocalStat
 
 export async function loadState(): Promise<LocalState> {
   return json(await fetch("/api/state"));
+}
+
+export async function loadCache(): Promise<GanttCache | null> {
+  const res = await fetch("/api/cache");
+  if (res.status === 204) return null;
+  return json(res);
+}
+
+export async function saveCache(partial: Partial<GanttCache>): Promise<GanttCache> {
+  return json(
+    await fetch("/api/cache", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(partial),
+    }),
+  );
+}
+
+export async function fetchTransitions(
+  issueKey: string,
+): Promise<{ key: string; transitions: StatusTransition[] }> {
+  return json(await fetch(`/api/transitions/${encodeURIComponent(issueKey)}`));
 }

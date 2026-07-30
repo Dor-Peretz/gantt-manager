@@ -1,0 +1,14 @@
+{
+  "jql": "project = SBT AND parent = SBT-61018 ORDER BY rank ASC",
+  "projectStart": "2026-07-21",
+  "showHolidays": true,
+  "showDeps": true,
+  "dayWidthPx": 28,
+  "leftPanelWidth": 680,
+  "resourcesDockHeight": 220,
+  "theme": "light",
+  "collapsed": {},
+  "milestoneColors": {},
+  "resources": [],
+  "allocations": {}
+}

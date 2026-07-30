@@ -2,7 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import dotenv from "dotenv";
-import { healthCheck, pullFromJira, pushToJira } from "./jira.ts";
+import { mergeCache, readCache, writeCache, type GanttCache } from "./cache.ts";
+import { getTransitions, healthCheck, pullFromJira, pushToJira } from "./jira.ts";
 import { mergeState, readState, writeState } from "./state.ts";
 import type { LocalState, PushItem } from "../src/lib/types.ts";
 
@@ -24,6 +25,8 @@ app.get("/api/config", (_req, res) => {
   res.json({
     jql: state.jql || process.env.JIRA_JQL || "",
     baseUrl: process.env.JIRA_BASE_URL || "",
+    prefsFile: "preferences.json",
+    preferences: state,
   });
 });
 
@@ -44,6 +47,37 @@ app.put("/api/state", (req, res) => {
 app.post("/api/state", (req, res) => {
   try {
     const next = writeState(req.body as LocalState);
+    res.json(next);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/cache", (_req, res) => {
+  const cache = readCache();
+  if (!cache) {
+    res.status(204).end();
+    return;
+  }
+  res.json(cache);
+});
+
+app.put("/api/cache", (req, res) => {
+  try {
+    const body = req.body as Partial<GanttCache>;
+    if (body.model) {
+      res.json(writeCache({
+        model: body.model,
+        scroll: body.scroll || { tasksLeft: 0, tasksTop: 0, resLeft: 0 },
+        savedAt: new Date().toISOString(),
+      }));
+      return;
+    }
+    const next = mergeCache(body);
+    if (!next) {
+      res.status(400).json({ error: "No cache to update" });
+      return;
+    }
     res.json(next);
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -81,6 +115,21 @@ app.post("/api/push", async (req, res) => {
     res.json({ results });
   } catch (err) {
     console.error("push failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/transitions/:key", async (req, res) => {
+  try {
+    const key = String(req.params.key || "").trim();
+    if (!key) {
+      res.status(400).json({ error: "issue key required" });
+      return;
+    }
+    const transitions = await getTransitions(key);
+    res.json({ key, transitions });
+  } catch (err) {
+    console.error("transitions failed", err);
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

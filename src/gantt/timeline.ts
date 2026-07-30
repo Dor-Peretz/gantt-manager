@@ -15,6 +15,8 @@ export interface DayCol {
   date: Date;
   ymd: string;
   dow: string;
+  /** Day of month (1–31), shown above the weekday letter. */
+  dom: number;
   isWeekend: boolean;
   isHoliday: boolean;
   holidayLabel: string | null;
@@ -32,7 +34,7 @@ export interface RowLayout {
 const DOW = ["S", "M", "T", "W", "T", "F", "S"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export const ROW_H = 40;
-export const HEAD_H = 52;
+export const HEAD_H = 64;
 
 export function visibleTasks(milestones: Milestone[]): GanttTask[] {
   const out: GanttTask[] = [];
@@ -40,6 +42,11 @@ export function visibleTasks(milestones: Milestone[]): GanttTask[] {
     if (!m.collapsed) out.push(...m.tasks);
   }
   return out;
+}
+
+/** True when the task is the epic's own schedule (no child stories). */
+export function isEpicSelfTask(milestoneId: string, task: GanttTask): boolean {
+  return task.id === milestoneId;
 }
 
 export function buildRows(milestones: Milestone[]): RowLayout[] {
@@ -50,6 +57,8 @@ export function buildRows(milestones: Milestone[]): RowLayout[] {
     i++;
     if (!m.collapsed) {
       for (const t of m.tasks) {
+        // Epic self-schedule is shown on the milestone row, not nested under it.
+        if (isEpicSelfTask(m.id, t)) continue;
         rows.push({ kind: "task", milestone: m, task: t, rowIndex: i, y: HEAD_H + i * ROW_H });
         i++;
       }
@@ -91,6 +100,7 @@ export function buildDays(start: Date, end: Date, holidaysOn: boolean): DayCol[]
       date: new Date(cur),
       ymd: formatYmd(cur),
       dow: DOW[cur.getDay()],
+      dom: cur.getDate(),
       isWeekend: isWeekend(cur),
       isHoliday: holidaysOn && isHoliday(cur),
       holidayLabel: holidaysOn ? holidayName(cur) : null,
