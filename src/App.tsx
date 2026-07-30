@@ -9,6 +9,7 @@ import {
   saveState,
   type ScrollState,
 } from "./api";
+import { BrandLockup } from "./brand/BrandMark";
 import { GanttBoard } from "./gantt/GanttBoard";
 import type { GanttModel, GanttTask, LocalState, PushResult, ThemeMode } from "./lib/types";
 import { emptyModel } from "./lib/types";
@@ -410,11 +411,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Gantt Manager</h1>
-        <p className="sub">
-          Jira is the source of truth. Resources = assignees. Pull tasks, plan the schedule, then
-          Push Start date + Due date back.
-        </p>
+        <BrandLockup />
         <div className="app-header-actions">
           <button
             type="button"

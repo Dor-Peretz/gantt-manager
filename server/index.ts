@@ -144,5 +144,5 @@ app.get("*", (req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Gantt Manager API on http://localhost:${PORT}`);
+  console.log(`Gantt Manager · API http://localhost:${PORT}`);
 });

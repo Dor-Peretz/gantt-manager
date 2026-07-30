@@ -1,8 +1,12 @@
 # Gantt Manager
 
+**Plan timelines · sync with Jira**
+
 Local Jira-backed Gantt planner. **Jira is the source of truth** for issues; the app pulls via JQL, lets you plan on a TeamGantt-style chart, then **Push** writes schedule and status changes back to Jira.
 
 Stack: React + Vite (UI) · Express + TypeScript (API)
+
+Brand assets live in `public/favicon.svg`, `public/apple-touch-icon.svg`, and `src/brand/BrandMark.tsx`.
 
 ## Features
 
