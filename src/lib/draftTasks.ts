@@ -15,6 +15,7 @@ export function draftToTask(d: DraftTask): GanttTask {
     durationDays: d.durationDays,
     estDays: null,
     resourceIds: [],
+    pulledResourceIds: [],
     status: "To Do",
     pulledStatus: "To Do",
     transitionId: null,

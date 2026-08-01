@@ -40,7 +40,11 @@ export interface GanttTask {
   scheduleDirty?: boolean;
   /** True when a status transition is pending Push */
   statusDirty?: boolean;
-  /** Convenience: scheduleDirty || statusDirty */
+  /** Resource ids as of last Pull/Push (for assignee dirty detection) */
+  pulledResourceIds?: string[];
+  /** True when assignee differs from last Pull and needs Push */
+  assigneeDirty?: boolean;
+  /** Convenience: scheduleDirty || statusDirty || assigneeDirty */
   dirty?: boolean;
 }
 
@@ -145,6 +149,8 @@ export interface PushItem {
   /** When set, Push will transition the issue to this status */
   transitionId?: string | null;
   status?: string | null;
+  /** Jira account id to assign (null = unassign). Omit to leave assignee unchanged. */
+  assigneeAccountId?: string | null;
   /** When set, create a new Jira issue instead of updating an existing one */
   create?: {
     epicKey: string;

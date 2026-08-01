@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { ScrollState } from "../api";
@@ -115,6 +116,7 @@ interface Props {
     taskId: string,
     next: { status: string; transitionId: string | null },
   ) => void;
+  onResourceEdit: (taskId: string, resourceId: string | null) => void;
   onToggleCollapse: (milestoneId: string) => void;
   onMilestoneColorChange: (milestoneId: string, color: string) => void;
   onReorderMilestone: (fromId: string, toId: string, place: "before" | "after") => void;
@@ -161,6 +163,7 @@ export function GanttBoard({
   loadingDetail = null,
   onScheduleEdit,
   onStatusEdit,
+  onResourceEdit,
   onToggleCollapse,
   onMilestoneColorChange,
   onReorderMilestone,
@@ -273,6 +276,29 @@ export function GanttBoard({
   >(null);
 
   const [drag, setDrag] = useState<DragMode>(null);
+  /** Ghost bar while placing a start date on an unscheduled task. */
+  const [placeHover, setPlaceHover] = useState<{
+    taskId: string;
+    start: string;
+  } | null>(null);
+
+  function startFromTrackPointer(
+    e: ReactMouseEvent | ReactPointerEvent,
+    trackEl: HTMLElement,
+  ): string | null {
+    const rect = trackEl.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const idx = Math.floor(x / dayWidth);
+    if (idx < 0 || idx >= days.length) return null;
+    return formatYmd(firstWorkingDay(parseYmd(days[idx].ymd), holidaysOn));
+  }
+
+  function placeStartOnTask(task: GanttTask, start: string) {
+    const durationDays = Math.max(1, task.durationDays || 1);
+    const due = dueFromStartDuration(start, durationDays, holidaysOn);
+    onScheduleEdit(task.id, { start, due, durationDays });
+    setPlaceHover(null);
+  }
   const dragRef = useRef<DragMode>(null);
   const dayWidthRef = useRef(dayWidth);
   const holidaysOnRef = useRef(holidaysOn);
@@ -598,6 +624,18 @@ export function GanttBoard({
                 isLocalMs && localDate
                   ? markerLeft(days, localDate, dayWidth)
                   : null;
+              const canPlaceEpicSelf =
+                !preview && !!epicSelf && !epicSelf.start && !isLocalMs && !msGeo;
+              const epicPlaceGhost =
+                canPlaceEpicSelf &&
+                placeHover?.taskId === epicSelf.id &&
+                barGeometry(
+                  days,
+                  placeHover.start,
+                  Math.max(1, epicSelf.durationDays || 1),
+                  holidaysOn,
+                  dayWidth,
+                );
               return (
                 <div
                   className={`pg-row milestone${isLocalMs ? " local-ms" : ""}${
@@ -809,6 +847,10 @@ export function GanttBoard({
                           <AssignMenu
                             resources={model.resources}
                             selected={epicSelf.resourceIds}
+                            pulledSelected={epicSelf.pulledResourceIds ?? epicSelf.resourceIds}
+                            disabled={preview}
+                            issueKey={epicSelf.id}
+                            onChange={(resourceId) => onResourceEdit(epicSelf.id, resourceId)}
                           />
                         </div>
                       </>
@@ -821,13 +863,66 @@ export function GanttBoard({
                       </>
                     )}
                   </div>
-                  <div className="pg-track" style={{ width: trackW, minHeight: ROW_H }}>
+                  <div
+                    className={`pg-track${canPlaceEpicSelf ? " placeable" : ""}`}
+                    style={{ width: trackW, minHeight: ROW_H }}
+                    onPointerMove={
+                      canPlaceEpicSelf && epicSelf
+                        ? (e) => {
+                            const start = startFromTrackPointer(e, e.currentTarget);
+                            if (!start) {
+                              setPlaceHover(null);
+                              return;
+                            }
+                            if (
+                              placeHover?.taskId !== epicSelf.id ||
+                              placeHover.start !== start
+                            ) {
+                              setPlaceHover({ taskId: epicSelf.id, start });
+                            }
+                          }
+                        : undefined
+                    }
+                    onPointerLeave={
+                      canPlaceEpicSelf && epicSelf
+                        ? () => {
+                            if (placeHover?.taskId === epicSelf.id) setPlaceHover(null);
+                          }
+                        : undefined
+                    }
+                    onClick={
+                      canPlaceEpicSelf && epicSelf
+                        ? (e) => {
+                            const start = startFromTrackPointer(e, e.currentTarget);
+                            if (start) placeStartOnTask(epicSelf, start);
+                          }
+                        : undefined
+                    }
+                  >
                     <Bands days={days} dayWidth={dayWidth} />
                     <Markers
                       todayLeft={todayLeft}
                       projStartLeft={projStartLeft}
                       projEndLeft={projEndLeft}
                     />
+                    {epicPlaceGhost && epicSelf && (
+                      <div
+                        className="pg-bar pg-bar-ghost"
+                        style={{
+                          left: epicPlaceGhost.left,
+                          width: epicPlaceGhost.width,
+                          background: r.milestone.color,
+                        }}
+                        title={`Click to set start ${placeHover!.start}`}
+                      >
+                        <span className="pg-bar-label">
+                          {epicSelf.friendlyId || r.milestone.id}
+                        </span>
+                        <span className="pg-bar-ghost-hint">
+                          Set {placeHover!.start}
+                        </span>
+                      </div>
+                    )}
                     {isLocalMs && localStarLeft != null && epicSelf ? (
                       <div
                         className={`pg-milestone-star${
@@ -923,6 +1018,17 @@ export function GanttBoard({
             const geo =
               t.start &&
               barGeometry(days, t.start, t.durationDays, holidaysOn, dayWidth);
+            const canPlace = !preview && !t.start && !t.isMarker;
+            const placeGhost =
+              canPlace &&
+              placeHover?.taskId === t.id &&
+              barGeometry(
+                days,
+                placeHover.start,
+                Math.max(1, t.durationDays || 1),
+                holidaysOn,
+                dayWidth,
+              );
 
             const isRowDragging = rowDrag?.taskId === t.id;
             const dropCls =
@@ -1117,17 +1223,70 @@ export function GanttBoard({
                         ★
                       </span>
                     ) : (
-                      <AssignMenu resources={model.resources} selected={t.resourceIds} />
+                      <AssignMenu
+                        resources={model.resources}
+                        selected={t.resourceIds}
+                        pulledSelected={t.pulledResourceIds ?? t.resourceIds}
+                        disabled={preview}
+                        issueKey={t.id}
+                        onChange={(resourceId) => onResourceEdit(t.id, resourceId)}
+                      />
                     )}
                   </div>
                 </div>
-                <div className="pg-track" style={{ width: trackW, minHeight: ROW_H }}>
+                <div
+                  className={`pg-track${canPlace ? " placeable" : ""}`}
+                  style={{ width: trackW, minHeight: ROW_H }}
+                  onPointerMove={
+                    canPlace
+                      ? (e) => {
+                          const start = startFromTrackPointer(e, e.currentTarget);
+                          if (!start) {
+                            setPlaceHover(null);
+                            return;
+                          }
+                          if (placeHover?.taskId !== t.id || placeHover.start !== start) {
+                            setPlaceHover({ taskId: t.id, start });
+                          }
+                        }
+                      : undefined
+                  }
+                  onPointerLeave={
+                    canPlace
+                      ? () => {
+                          if (placeHover?.taskId === t.id) setPlaceHover(null);
+                        }
+                      : undefined
+                  }
+                  onClick={
+                    canPlace
+                      ? (e) => {
+                          const start = startFromTrackPointer(e, e.currentTarget);
+                          if (start) placeStartOnTask(t, start);
+                        }
+                      : undefined
+                  }
+                >
                   <Bands days={days} dayWidth={dayWidth} />
                   <Markers
                     todayLeft={todayLeft}
                     projStartLeft={projStartLeft}
                     projEndLeft={projEndLeft}
                   />
+                  {placeGhost && (
+                    <div
+                      className="pg-bar pg-bar-ghost"
+                      style={{
+                        left: placeGhost.left,
+                        width: placeGhost.width,
+                        background: colorForTask(t),
+                      }}
+                      title={`Click to set start ${placeHover!.start}`}
+                    >
+                      <span className="pg-bar-label">{t.friendlyId}</span>
+                      <span className="pg-bar-ghost-hint">Set {placeHover!.start}</span>
+                    </div>
+                  )}
                   {t.isMarker ? (
                     (() => {
                       const md = t.start || t.due;

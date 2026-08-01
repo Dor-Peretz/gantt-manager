@@ -41,7 +41,7 @@ export function ResourcesPane({ model, days, dayWidth }: Props) {
         <div className="pg-fixed">
           <span className="pg-res-title">Resources</span>
           <span className="pg-owner" style={{ fontWeight: 600 }}>
-            From Jira assignees · {model.resources.length} people
+            From Jira assignees · assign in the Res column, then Push
           </span>
         </div>
         <div className="pg-track" style={{ width: trackW }} />

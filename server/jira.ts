@@ -212,6 +212,7 @@ function taskFromIssue(
     durationDays: schedule.durationDays,
     estDays: schedule.estDays,
     resourceIds: resourceId ? [resourceId] : [],
+    pulledResourceIds: resourceId ? [resourceId] : [],
     status,
     pulledStatus: status,
     transitionId: null,
@@ -570,6 +571,9 @@ async function createIssueInJira(
     ];
 
     for (const fields of attempts) {
+      if (item.assigneeAccountId) {
+        fields.assignee = { accountId: item.assigneeAccountId };
+      }
       const res = await jiraFetch("/rest/api/3/issue", {
         method: "POST",
         body: JSON.stringify({ fields }),
@@ -659,6 +663,11 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
       const fields: Record<string, unknown> = {};
       fields[fieldMap.startDate] = item.start;
       fields.duedate = item.due;
+      if (item.assigneeAccountId !== undefined) {
+        fields.assignee = item.assigneeAccountId
+          ? { accountId: item.assigneeAccountId }
+          : null;
+      }
 
       const putRes = await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(item.key)}`, {
         method: "PUT",

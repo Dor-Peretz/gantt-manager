@@ -12,6 +12,7 @@ import {
 import { BrandLockup } from "./brand/BrandMark";
 import { AddMilestoneDialog } from "./gantt/AddMilestoneDialog";
 import { AddTaskDialog } from "./gantt/AddTaskDialog";
+import { ProjectOptionsPanel } from "./gantt/ProjectOptionsPanel";
 import { GanttBoard } from "./gantt/GanttBoard";
 import {
   collectDraftTasks,
@@ -37,6 +38,14 @@ import type {
 } from "./lib/types";
 import { emptyModel } from "./lib/types";
 import { dueFromStartDuration, setCustomNonWorkingDays } from "./lib/workdays";
+
+function assigneeAccountIdForPush(t: GanttTask): string | null | undefined {
+  if (!t.assigneeDirty) return undefined;
+  const id = t.resourceIds[0];
+  if (!id) return null;
+  if (!id.startsWith("jira:")) return undefined;
+  return id.slice(5);
+}
 
 function applyTheme(theme: ThemeMode) {
   document.documentElement.setAttribute("data-theme", theme);
@@ -118,9 +127,13 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
             status: d.statusDirty ? d.status : t.status,
             pulledStatus: t.pulledStatus || t.status,
             transitionId: d.statusDirty ? d.transitionId ?? null : null,
+            resourceIds: d.assigneeDirty ? d.resourceIds : t.resourceIds,
+            assignee: d.assigneeDirty ? d.assignee : t.assignee,
+            pulledResourceIds: t.pulledResourceIds ?? t.resourceIds,
             scheduleDirty: !!d.scheduleDirty,
             statusDirty: !!d.statusDirty,
-            dirty: !!(d.scheduleDirty || d.statusDirty),
+            assigneeDirty: !!d.assigneeDirty,
+            dirty: !!(d.scheduleDirty || d.statusDirty || d.assigneeDirty),
             jiraUpdated: t.jiraUpdated,
           };
         }),
@@ -352,8 +365,7 @@ export default function App() {
   const [addTaskOpen, setAddTaskOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewChromeHidden, setPreviewChromeHidden] = useState(false);
-  const [offDayDate, setOffDayDate] = useState("");
-  const [offDayName, setOffDayName] = useState("");
+  const [optionsOpen, setOptionsOpen] = useState(false);
 
   useEffect(() => {
     setCustomNonWorkingDays(model.customNonWorkingDays || []);
@@ -393,20 +405,16 @@ export default function App() {
     [persistLocal, persistCache, jql],
   );
 
-  function addCustomOffDay() {
-    const date = offDayDate.trim();
-    if (!date) return;
+  function addCustomOffDay(date: string, name?: string) {
     updateModel((prev) => {
       const existing = prev.customNonWorkingDays || [];
       if (existing.some((d) => d.date === date)) return prev;
       const next: CustomNonWorkingDay[] = [
         ...existing,
-        { date, name: offDayName.trim() || undefined },
+        { date, name: name || undefined },
       ].sort((a, b) => a.date.localeCompare(b.date));
       return { ...prev, customNonWorkingDays: next };
     });
-    setOffDayDate("");
-    setOffDayName("");
   }
 
   function removeCustomOffDay(date: string) {
@@ -448,6 +456,7 @@ export default function App() {
           jiraUpdated: t.jiraUpdated,
           transitionId: t.pendingCreate ? null : t.transitionId || null,
           status: t.status,
+          assigneeAccountId: assigneeAccountIdForPush(t),
           create: t.pendingCreate
             ? {
                 epicKey: t.createEpicId || "",
@@ -478,8 +487,10 @@ export default function App() {
                 dirty: false,
                 scheduleDirty: false,
                 statusDirty: false,
+                assigneeDirty: false,
                 transitionId: null,
                 pulledStatus: t.status,
+                pulledResourceIds: [...(t.resourceIds || [])],
                 jiraUpdated: r.jiraUpdated || t.jiraUpdated,
               };
             }
@@ -512,12 +523,12 @@ export default function App() {
         tasks: m.tasks.map((t) => {
           if (t.id !== taskId) return t;
           wasLocal = !!t.localOnly;
+          const scheduleDirty = t.localOnly ? false : true;
           const next = {
             ...t,
             ...patch,
-            // Local milestones never go to Jira — keep them non-dirty.
-            scheduleDirty: t.localOnly ? false : true,
-            dirty: t.localOnly ? false : true,
+            scheduleDirty,
+            dirty: !!(scheduleDirty || t.statusDirty || t.assigneeDirty),
           };
           if (patch.start !== undefined || patch.durationDays !== undefined) {
             if (t.localOnly || t.isMarker) {
@@ -616,7 +627,7 @@ export default function App() {
             status: next.status,
             transitionId: next.transitionId,
             statusDirty,
-            dirty: !!(t.scheduleDirty || statusDirty),
+            dirty: !!(t.scheduleDirty || statusDirty || t.assigneeDirty),
           };
         }),
       })),
@@ -626,6 +637,32 @@ export default function App() {
         ? "Unsaved status change — Push to update Jira"
         : "Status reset to Jira value",
     );
+  }
+
+  function onResourceEdit(taskId: string, resourceId: string | null) {
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks.map((t) => {
+          if (t.id !== taskId || t.localOnly) return t;
+          const resource = resourceId
+            ? prev.resources.find((r) => r.id === resourceId)
+            : null;
+          const pulled = t.pulledResourceIds ?? [];
+          const nextIds = resourceId ? [resourceId] : [];
+          const assigneeDirty = (pulled[0] || null) !== (nextIds[0] || null);
+          return {
+            ...t,
+            resourceIds: nextIds,
+            assignee: resource?.name || null,
+            assigneeDirty,
+            dirty: !!(t.scheduleDirty || t.statusDirty || assigneeDirty),
+          };
+        }),
+      })),
+    }));
+    setStatus("Unsaved assignee change — Push to update Jira");
   }
 
   function onToggleCollapse(milestoneId: string) {
@@ -835,7 +872,7 @@ export default function App() {
           className={`gantt-btn${dirtyTasks.length ? " warn" : ""}${busy === "push" ? " is-busy" : ""}`}
           disabled={busy !== null || dirtyTasks.length === 0}
           onClick={() => void onPush()}
-          title="Create draft tasks in Jira and write Start/Due/status for dirty items"
+          title="Create draft tasks in Jira and write Start/Due/status/assignee for dirty items"
         >
           {busy === "push" ? (
             <>
@@ -846,80 +883,14 @@ export default function App() {
             `Push${dirtyTasks.length ? ` (${dirtyTasks.length})` : ""}`
           )}
         </button>
-        <label className="pg-field">
-          Project start
-          <input
-            type="date"
-            value={model.projectStart}
-            onChange={(e) =>
-              updateModel((prev) => ({ ...prev, projectStart: e.target.value }))
-            }
-          />
-        </label>
-        <label className="pg-field pg-check" title="Israeli public holidays (0 hours when on)">
-          <input
-            type="checkbox"
-            checked={model.showHolidays}
-            onChange={(e) =>
-              updateModel((prev) => ({ ...prev, showHolidays: e.target.checked }))
-            }
-          />
-          IL holidays
-        </label>
-        <div className="pg-off-days" title="Manual non-working days — always apply">
-          <label className="pg-field pg-off-day-add">
-            Off day
-            <input
-              type="date"
-              value={offDayDate}
-              onChange={(e) => setOffDayDate(e.target.value)}
-            />
-            <input
-              type="text"
-              className="pg-off-day-name"
-              value={offDayName}
-              onChange={(e) => setOffDayName(e.target.value)}
-              placeholder="Label (optional)"
-              maxLength={40}
-            />
-            <button
-              type="button"
-              className="gantt-btn"
-              disabled={!offDayDate}
-              onClick={addCustomOffDay}
-            >
-              Add
-            </button>
-          </label>
-          {(model.customNonWorkingDays?.length ?? 0) > 0 && (
-            <div className="pg-off-day-list">
-              {model.customNonWorkingDays.map((d) => (
-                <span key={d.date} className="pg-off-day-chip" title={d.name || "Off day"}>
-                  <span className="pg-off-day-chip-text">
-                    {d.date}
-                    {d.name ? ` · ${d.name}` : ""}
-                  </span>
-                  <button
-                    type="button"
-                    className="pg-off-day-remove"
-                    onClick={() => removeCustomOffDay(d.date)}
-                    aria-label={`Remove off day ${d.date}`}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-        <label className="pg-field pg-check" title="Prerequisite arrows from Jira Blocks links">
-          <input
-            type="checkbox"
-            checked={model.showDeps}
-            onChange={(e) => updateModel((prev) => ({ ...prev, showDeps: e.target.checked }))}
-          />
-          Prerequisites
-        </label>
+        <button
+          type="button"
+          className="gantt-btn"
+          onClick={() => setOptionsOpen(true)}
+          title="Project start, holidays, off days, and prerequisites"
+        >
+          Options
+        </button>
         <p className="hint">{hint}</p>
         <span className={`status${dirtyTasks.length ? " dirty" : ""}`}>{status}</span>
         {prefsSavedAt && (
@@ -958,6 +929,7 @@ export default function App() {
         }
         onScheduleEdit={onScheduleEdit}
         onStatusEdit={onStatusEdit}
+        onResourceEdit={onResourceEdit}
         onToggleCollapse={onToggleCollapse}
         onMilestoneColorChange={onMilestoneColorChange}
         onReorderMilestone={onReorderMilestone}
@@ -989,6 +961,26 @@ export default function App() {
         onAdd={onAddLocalMilestone}
       />
 
+      <ProjectOptionsPanel
+        open={optionsOpen}
+        projectStart={model.projectStart}
+        showHolidays={model.showHolidays}
+        showDeps={model.showDeps}
+        customNonWorkingDays={model.customNonWorkingDays || []}
+        onClose={() => setOptionsOpen(false)}
+        onProjectStartChange={(value) =>
+          updateModel((prev) => ({ ...prev, projectStart: value }))
+        }
+        onShowHolidaysChange={(value) =>
+          updateModel((prev) => ({ ...prev, showHolidays: value }))
+        }
+        onShowDepsChange={(value) =>
+          updateModel((prev) => ({ ...prev, showDeps: value }))
+        }
+        onAddOffDay={addCustomOffDay}
+        onRemoveOffDay={removeCustomOffDay}
+      />
+
       <div className="pg-legend">
         <span>
           <i className="m-start" /> Project start / end
@@ -1011,7 +1003,7 @@ export default function App() {
         <span>
           <i className="m-dep" /> Prerequisite
         </span>
-        <span>Push writes Start date, Due date, and status transitions to Jira</span>
+        <span>Push writes Start date, Due date, status transitions, and assignee to Jira</span>
       </div>
     </div>
   );
