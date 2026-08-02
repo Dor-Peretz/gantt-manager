@@ -188,7 +188,11 @@ interface Props {
   onScheduleEdit: (taskId: string, patch: Partial<GanttTask>) => void;
   onStatusEdit: (
     taskId: string,
-    next: { status: string; transitionId: string | null },
+    next: {
+      status: string;
+      transitionId: string | null;
+      timeSpent?: string | null;
+    },
   ) => void;
   onResourceEdit: (taskId: string, resourceId: string | null) => void;
   onToggleCollapse: (milestoneId: string) => void;
@@ -368,9 +372,10 @@ export function GanttBoard({
   }
 
   function placeStartOnTask(task: GanttTask, start: string) {
+    // Keep existing geometry duration; do not invent a Story Points estimate.
     const durationDays = Math.max(1, task.durationDays || 1);
     const due = dueFromStartDuration(start, durationDays, holidaysOn);
-    onScheduleEdit(task.id, { start, due, durationDays });
+    onScheduleEdit(task.id, { start, due });
     setPlaceHover(null);
   }
   const dragRef = useRef<DragMode>(null);
@@ -894,9 +899,20 @@ export function GanttBoard({
                             className="pg-input dur"
                             type="number"
                             min={1}
-                            value={epicSelf.durationDays}
+                            placeholder="—"
+                            title={
+                              epicSelf.estDays == null
+                                ? "No Story Points in Jira"
+                                : "Story Points (Dur)"
+                            }
+                            value={epicSelf.estDays ?? ""}
                             onChange={(e) => {
-                              const durationDays = Math.max(1, Number(e.target.value) || 1);
+                              const raw = e.target.value;
+                              if (raw === "") {
+                                onScheduleEdit(epicSelf.id, { estDays: null });
+                                return;
+                              }
+                              const durationDays = Math.max(1, Number(raw) || 1);
                               const due = epicSelf.start
                                 ? dueFromStartDuration(
                                     epicSelf.start,
@@ -904,7 +920,11 @@ export function GanttBoard({
                                     holidaysOn,
                                   )
                                 : epicSelf.due;
-                              onScheduleEdit(epicSelf.id, { durationDays, due });
+                              onScheduleEdit(epicSelf.id, {
+                                durationDays,
+                                due,
+                                estDays: durationDays,
+                              });
                             }}
                           />
                           <span className="pg-dur-suffix">d</span>
@@ -915,6 +935,8 @@ export function GanttBoard({
                             status={epicSelf.status}
                             pulledStatus={epicSelf.pulledStatus || epicSelf.status}
                             transitionId={epicSelf.transitionId}
+                            durationDays={epicSelf.durationDays}
+                            timeSpent={epicSelf.timeSpent}
                             onChange={(next) => onStatusEdit(epicSelf.id, next)}
                           />
                         </div>
@@ -1279,13 +1301,26 @@ export function GanttBoard({
                           className="pg-input dur"
                           type="number"
                           min={1}
-                          value={t.durationDays}
+                          placeholder="—"
+                          title={
+                            t.estDays == null ? "No Story Points in Jira" : "Story Points (Dur)"
+                          }
+                          value={t.estDays ?? ""}
                           onChange={(e) => {
-                            const durationDays = Math.max(1, Number(e.target.value) || 1);
+                            const raw = e.target.value;
+                            if (raw === "") {
+                              onScheduleEdit(t.id, { estDays: null });
+                              return;
+                            }
+                            const durationDays = Math.max(1, Number(raw) || 1);
                             const due = t.start
                               ? dueFromStartDuration(t.start, durationDays, holidaysOn)
                               : t.due;
-                            onScheduleEdit(t.id, { durationDays, due });
+                            onScheduleEdit(t.id, {
+                              durationDays,
+                              due,
+                              estDays: durationDays,
+                            });
                           }}
                         />
                         <span className="pg-dur-suffix">d</span>
@@ -1307,6 +1342,8 @@ export function GanttBoard({
                         status={t.status}
                         pulledStatus={t.pulledStatus || t.status}
                         transitionId={t.transitionId}
+                        durationDays={t.durationDays}
+                        timeSpent={t.timeSpent}
                         onChange={(next) => onStatusEdit(t.id, next)}
                       />
                     )}

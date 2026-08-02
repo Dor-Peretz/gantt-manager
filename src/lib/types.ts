@@ -25,6 +25,8 @@ export interface GanttTask {
   pulledStart?: string | null;
   pulledDue?: string | null;
   pulledDurationDays?: number;
+  /** Story Points estimate as of last Pull/Push (`null` = none in Jira) */
+  pulledEstDays?: number | null;
   /** Jira transition id to apply on Push (when status changed) */
   transitionId?: string | null;
   assignee: string | null;
@@ -44,6 +46,11 @@ export interface GanttTask {
   scheduleDirty?: boolean;
   /** True when a status transition is pending Push */
   statusDirty?: boolean;
+  /**
+   * Actual time spent for a pending Done transition (Jira timeSpent, e.g. "3d").
+   * Asked when the user picks Done; sent on Push as a worklog.
+   */
+  timeSpent?: string | null;
   /** Resource ids as of last Pull/Push (for assignee dirty detection) */
   pulledResourceIds?: string[];
   /** True when assignee differs from last Pull and needs Push */
@@ -150,12 +157,14 @@ export interface PushItem {
   start: string | null;
   due: string | null;
   jiraUpdated: string;
+  /** Working-day estimate written to Jira Story Points */
+  storyPoints?: number | null;
   /** When set, Push will transition the issue to this status */
   transitionId?: string | null;
   status?: string | null;
   /**
    * Actual time spent to log when transitioning to Done (Jira timeSpent, e.g. "3d").
-   * Required by many Done validators — derived from durationDays.
+   * Entered by the user when selecting Done.
    */
   timeSpent?: string | null;
   /** Jira account id to assign (null = unassign). Omit to leave assignee unchanged. */

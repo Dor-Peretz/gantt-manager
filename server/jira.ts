@@ -95,7 +95,11 @@ export async function discoverFields(): Promise<FieldMap> {
     const byName = new Map(fields.map((f) => [f.name.toLowerCase(), f.id]));
     cachedFields = {
       startDate: byName.get("start date") || FALLBACK_FIELDS.startDate,
-      storyPoints: byName.get("story points") || FALLBACK_FIELDS.storyPoints,
+      storyPoints:
+        byName.get("story points") ||
+        byName.get("story point estimate") ||
+        byName.get("storypoint") ||
+        FALLBACK_FIELDS.storyPoints,
       team: byName.get("team") || FALLBACK_FIELDS.team,
       epicLink: byName.get("epic link") || FALLBACK_FIELDS.epicLink,
     };
@@ -147,43 +151,61 @@ function ownerLabel(fields: Record<string, unknown>, fieldMap: FieldMap): string
   return parts.join(" · ") || "—";
 }
 
-/** Resolve start/due/duration from Jira dates + story-point estimate. */
+function parseStoryPoints(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/**
+ * Resolve start/due/duration from Jira dates + Story Points.
+ * Story Points are the app's Dur estimate whenever present (1 SP ≈ 1 working day).
+ */
 function scheduleFromFields(
   start: string | null,
   due: string | null,
   sp: number | null,
   holidaysOn: boolean,
 ): { start: string | null; due: string | null; durationDays: number; estDays: number | null } {
-  const estDays = typeof sp === "number" && Number.isFinite(sp) ? sp : null;
+  // Jira is source of truth: missing / non-positive SP means no estimate in the app.
+  const estDays = sp != null && Number.isFinite(sp) && sp > 0 ? sp : null;
   const estDur = estDays != null ? Math.max(1, Math.round(estDays)) : null;
 
+  // Prefer Story Points as Dur — keep Start, derive Due to match the estimate.
+  if (estDur != null) {
+    if (start) {
+      return {
+        start,
+        due: dueFromStartDuration(start, estDur, holidaysOn),
+        durationDays: estDur,
+        estDays,
+      };
+    }
+    if (due) {
+      return {
+        start: startFromDueDuration(due, estDur, holidaysOn),
+        due,
+        durationDays: estDur,
+        estDays,
+      };
+    }
+    return { start: null, due: null, durationDays: estDur, estDays };
+  }
+
+  // No Story Points — fall back to date span / defaults.
   if (start && due) {
     return {
       start,
       due,
       durationDays: durationFromStartDue(start, due, holidaysOn),
-      estDays,
+      estDays: null,
     };
   }
-  if (start && estDur != null) {
-    return {
-      start,
-      due: dueFromStartDuration(start, estDur, holidaysOn),
-      durationDays: estDur,
-      estDays,
-    };
-  }
-  if (due && estDur != null) {
-    return {
-      start: startFromDueDuration(due, estDur, holidaysOn),
-      due,
-      durationDays: estDur,
-      estDays,
-    };
-  }
-  if (start) return { start, due, durationDays: 1, estDays };
-  if (due) return { start: null, due, durationDays: estDur ?? 1, estDays };
-  if (estDur != null) return { start: null, due: null, durationDays: estDur, estDays };
+  if (start) return { start, due, durationDays: 1, estDays: null };
+  if (due) return { start: null, due, durationDays: 1, estDays: null };
   return { start: null, due: null, durationDays: 1, estDays: null };
 }
 
@@ -197,7 +219,7 @@ function taskFromIssue(
   const { friendlyId, title } = parseSummary(String(f.summary || ""));
   const startRaw = (f[fieldMap.startDate] as string | null) || null;
   const dueRaw = (f.duedate as string | null) || null;
-  const sp = f[fieldMap.storyPoints] as number | null;
+  const sp = parseStoryPoints(f[fieldMap.storyPoints]);
   const schedule = scheduleFromFields(startRaw, dueRaw, sp, holidaysOn);
   const assignee = f.assignee as { accountId?: string; displayName?: string } | null;
   const status = (f.status as { name?: string } | null)?.name || "—";
@@ -218,6 +240,7 @@ function taskFromIssue(
     pulledStart: schedule.start,
     pulledDue: schedule.due,
     pulledDurationDays: schedule.durationDays,
+    pulledEstDays: schedule.estDays,
     transitionId: null,
     assignee: assignee?.displayName || null,
     blockedBy: blockedByKeys(f),
@@ -405,8 +428,8 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     const f = epicIssue.fields;
     const start = (f[fieldMap.startDate] as string | null) || null;
     const due = (f.duedate as string | null) || null;
-    const sp = f[fieldMap.storyPoints] as number | null;
-    if (!start && !due && !(typeof sp === "number" && Number.isFinite(sp))) continue;
+    const sp = parseStoryPoints(f[fieldMap.storyPoints]);
+    if (!start && !due && sp == null) continue;
     const assignee = f.assignee as {
       accountId?: string;
       displayName?: string;
@@ -637,6 +660,10 @@ async function createIssueInJira(
 
   for (const typeName of issueTypes) {
     // Prefer parent (next-gen / hierarchy); fall back to Epic Link (classic).
+    const sp =
+      item.storyPoints != null && Number.isFinite(item.storyPoints) && item.storyPoints > 0
+        ? Math.max(1, Math.round(item.storyPoints))
+        : null;
     const attempts: Array<Record<string, unknown>> = [
       {
         project: { key: projectKey },
@@ -645,6 +672,7 @@ async function createIssueInJira(
         parent: { key: create.epicKey },
         [fieldMap.startDate]: item.start,
         duedate: item.due,
+        ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
       },
       {
         project: { key: projectKey },
@@ -653,6 +681,7 @@ async function createIssueInJira(
         [fieldMap.epicLink]: create.epicKey,
         [fieldMap.startDate]: item.start,
         duedate: item.due,
+        ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
       },
     ];
 
@@ -749,6 +778,13 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
       const fields: Record<string, unknown> = {};
       fields[fieldMap.startDate] = item.start;
       fields.duedate = item.due;
+      // `null` clears Story Points in Jira; `undefined` leaves the field untouched.
+      if (item.storyPoints !== undefined) {
+        fields[fieldMap.storyPoints] =
+          item.storyPoints != null && Number.isFinite(item.storyPoints) && item.storyPoints > 0
+            ? Math.max(1, Math.round(item.storyPoints))
+            : null;
+      }
       if (item.assigneeAccountId !== undefined) {
         fields.assignee = item.assigneeAccountId
           ? { accountId: item.assigneeAccountId }

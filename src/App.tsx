@@ -51,11 +51,11 @@ function isDoneLikeStatus(status: string | null | undefined): boolean {
   return /done|closed|resolved|complete|ship/i.test(status || "");
 }
 
-/** Jira timeSpent string for Done transitions (working days from the gantt). */
+/** Actual time spent entered by the user for a Done transition. */
 function timeSpentForPush(t: GanttTask): string | null {
   if (t.pendingCreate || !t.transitionId || !isDoneLikeStatus(t.status)) return null;
-  const days = Math.max(1, Math.round(t.durationDays || 1));
-  return `${days}d`;
+  const entered = t.timeSpent?.trim();
+  return entered || null;
 }
 
 function applyTheme(theme: ThemeMode) {
@@ -135,12 +135,15 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
             start: d.scheduleDirty ? d.start : t.start,
             due: d.scheduleDirty ? d.due : t.due,
             durationDays: d.scheduleDirty ? d.durationDays : t.durationDays,
+            estDays: d.scheduleDirty ? d.estDays : t.estDays,
             status: d.statusDirty ? d.status : t.status,
             pulledStatus: t.pulledStatus || t.status,
             pulledStart: t.pulledStart ?? t.start,
             pulledDue: t.pulledDue ?? t.due,
             pulledDurationDays: t.pulledDurationDays ?? t.durationDays,
+            pulledEstDays: t.pulledEstDays !== undefined ? t.pulledEstDays : t.estDays,
             transitionId: d.statusDirty ? d.transitionId ?? null : null,
+            timeSpent: d.statusDirty ? d.timeSpent ?? null : null,
             resourceIds: d.assigneeDirty ? d.resourceIds : t.resourceIds,
             assignee: d.assigneeDirty ? d.assignee : t.assignee,
             pulledResourceIds: t.pulledResourceIds ?? t.resourceIds,
@@ -480,8 +483,10 @@ export default function App() {
               start: t.pulledStart !== undefined ? t.pulledStart : t.start,
               due: t.pulledDue !== undefined ? t.pulledDue : t.due,
               durationDays: t.pulledDurationDays ?? t.durationDays,
+              estDays: t.pulledEstDays !== undefined ? t.pulledEstDays : t.estDays,
               status: t.pulledStatus || t.status,
               transitionId: null,
+              timeSpent: null,
               resourceIds,
               assignee: resource?.name ?? null,
               scheduleDirty: false,
@@ -499,6 +504,20 @@ export default function App() {
 
   async function onPush() {
     if (!dirtyTasks.length) return;
+    const missingTime = dirtyTasks.filter(
+      (t) =>
+        !t.pendingCreate &&
+        t.transitionId &&
+        isDoneLikeStatus(t.status) &&
+        !t.timeSpent?.trim(),
+    );
+    if (missingTime.length) {
+      setError(
+        `Enter actual time spent for Done: ${missingTime.map((t) => t.id).join(", ")}`,
+      );
+      setStatus("Push blocked — actual time required for Done");
+      return;
+    }
     setBusy("push");
     setError(null);
     const creates = dirtyTasks.filter((t) => t.pendingCreate).length;
@@ -509,23 +528,40 @@ export default function App() {
     );
     try {
       const { results } = await pushGantt(
-        dirtyTasks.map((t) => ({
-          key: t.id,
-          start: t.start,
-          due: t.due,
-          jiraUpdated: t.jiraUpdated,
-          transitionId: t.pendingCreate ? null : t.transitionId || null,
-          status: t.status,
-          timeSpent: timeSpentForPush(t),
-          assigneeAccountId: assigneeAccountIdForPush(t),
-          create: t.pendingCreate
-            ? {
-                epicKey: t.createEpicId || "",
-                summary: t.title,
-                draftId: t.id,
-              }
-            : undefined,
-        })),
+        dirtyTasks.map((t) => {
+          // Story Points follow estDays (Jira source of truth). null clears SP.
+          // Omit when schedule wasn't edited so assignee/status-only pushes leave SP alone.
+          let storyPoints: number | null | undefined;
+          if (t.pendingCreate) {
+            storyPoints =
+              t.estDays != null && t.estDays > 0
+                ? Math.max(1, Math.round(t.estDays))
+                : Math.max(1, Math.round(t.durationDays || 1));
+          } else if (t.scheduleDirty) {
+            storyPoints =
+              t.estDays != null && t.estDays > 0
+                ? Math.max(1, Math.round(t.estDays))
+                : null;
+          }
+          return {
+            key: t.id,
+            start: t.start,
+            due: t.due,
+            storyPoints,
+            jiraUpdated: t.jiraUpdated,
+            transitionId: t.pendingCreate ? null : t.transitionId || null,
+            status: t.status,
+            timeSpent: timeSpentForPush(t),
+            assigneeAccountId: assigneeAccountIdForPush(t),
+            create: t.pendingCreate
+              ? {
+                  epicKey: t.createEpicId || "",
+                  summary: t.title,
+                  draftId: t.id,
+                }
+              : undefined,
+          };
+        }),
       );
       setPushResults(results);
       updateModel((prev) => ({
@@ -550,10 +586,13 @@ export default function App() {
                 statusDirty: false,
                 assigneeDirty: false,
                 transitionId: null,
+                timeSpent: null,
+                estDays: t.estDays,
                 pulledStatus: t.status,
                 pulledStart: t.start,
                 pulledDue: t.due,
                 pulledDurationDays: t.durationDays,
+                pulledEstDays: t.estDays,
                 pulledResourceIds: [...(t.resourceIds || [])],
                 jiraUpdated: r.jiraUpdated || t.jiraUpdated,
               };
@@ -595,6 +634,7 @@ export default function App() {
             pulledStart: t.pulledStart !== undefined ? t.pulledStart : t.start,
             pulledDue: t.pulledDue !== undefined ? t.pulledDue : t.due,
             pulledDurationDays: t.pulledDurationDays ?? t.durationDays,
+            pulledEstDays: t.pulledEstDays !== undefined ? t.pulledEstDays : t.estDays,
             scheduleDirty,
             dirty: !!(scheduleDirty || t.statusDirty || t.assigneeDirty),
           };
@@ -604,13 +644,32 @@ export default function App() {
               next.start = date;
               next.due = date;
               next.durationDays = 1;
-            } else {
+            } else if (next.start) {
               next.due = dueFromStartDuration(
                 next.start,
                 next.durationDays,
                 prev.showHolidays,
               );
             }
+          }
+          // Dur / bar resize writes the estimate; empty estDays means none (matches Jira).
+          if (patch.estDays !== undefined && !t.localOnly) {
+            next.estDays =
+              patch.estDays != null && patch.estDays > 0
+                ? Math.max(1, Math.round(patch.estDays))
+                : null;
+            if (next.estDays != null) {
+              next.durationDays = next.estDays;
+              if (next.start) {
+                next.due = dueFromStartDuration(
+                  next.start,
+                  next.durationDays,
+                  prev.showHolidays,
+                );
+              }
+            }
+          } else if (patch.durationDays !== undefined && !t.localOnly) {
+            next.estDays = Math.max(1, Math.round(next.durationDays || 1));
           }
           return next;
         }),
@@ -681,7 +740,11 @@ export default function App() {
 
   function onStatusEdit(
     taskId: string,
-    next: { status: string; transitionId: string | null },
+    next: {
+      status: string;
+      transitionId: string | null;
+      timeSpent?: string | null;
+    },
   ) {
     updateModel((prev) => ({
       ...prev,
@@ -694,6 +757,7 @@ export default function App() {
             ...t,
             status: next.status,
             transitionId: next.transitionId,
+            timeSpent: statusDirty ? next.timeSpent ?? null : null,
             statusDirty,
             dirty: !!(t.scheduleDirty || statusDirty || t.assigneeDirty),
           };
@@ -702,7 +766,9 @@ export default function App() {
     }));
     setStatus(
       next.transitionId
-        ? "Unsaved status change — Push to update Jira"
+        ? next.timeSpent
+          ? `Unsaved Done + actual ${next.timeSpent} — Push to update Jira`
+          : "Unsaved status change — Push to update Jira"
         : "Status reset to Jira value",
     );
   }
@@ -940,7 +1006,7 @@ export default function App() {
           className={`gantt-btn${dirtyTasks.length ? " warn" : ""}${busy === "push" ? " is-busy" : ""}`}
           disabled={busy !== null || dirtyTasks.length === 0}
           onClick={() => void onPush()}
-          title="Create draft tasks in Jira and write Start/Due/status/assignee. Done transitions also log actual time (duration as worklog)."
+          title="Create draft tasks in Jira and write Start/Due/Story Points (from Dur)/status/assignee. Done transitions also log actual time."
         >
           {busy === "push" ? (
             <>
@@ -1080,7 +1146,7 @@ export default function App() {
         <span>
           <i className="m-dep" /> Prerequisite
         </span>
-        <span>Push writes Start date, Due date, status transitions, and assignee to Jira</span>
+        <span>Push writes Start date, Due date, Story Points (Dur), status, and assignee to Jira</span>
       </div>
     </div>
   );

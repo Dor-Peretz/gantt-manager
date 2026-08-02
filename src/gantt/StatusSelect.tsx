@@ -12,12 +12,31 @@ function statusClass(status: string): string {
   return "todo";
 }
 
+function isDoneLikeStatus(status: string): boolean {
+  return /done|closed|resolved|complete|ship/i.test(status || "");
+}
+
+/** Basic Jira timeSpent validation: e.g. 3d, 4h, 2d 4h, 30m */
+function isValidTimeSpent(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  if (!v) return false;
+  return /^(\d+\s*[wdhm]\s*)+$/i.test(v);
+}
+
 interface Props {
   issueKey: string;
   status: string;
   pulledStatus: string;
   transitionId?: string | null;
-  onChange: (next: { status: string; transitionId: string | null }) => void;
+  /** Suggested default when asking for actual time (working days). */
+  durationDays?: number;
+  /** Previously entered actual time (if any). */
+  timeSpent?: string | null;
+  onChange: (next: {
+    status: string;
+    transitionId: string | null;
+    timeSpent?: string | null;
+  }) => void;
 }
 
 interface MenuPos {
@@ -25,11 +44,19 @@ interface MenuPos {
   left: number;
 }
 
+interface PendingDone {
+  transitionId: string;
+  status: string;
+  transitionName: string;
+}
+
 export function StatusSelect({
   issueKey,
   status,
   pulledStatus,
   transitionId,
+  durationDays = 1,
+  timeSpent,
   onChange,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -37,8 +64,12 @@ export function StatusSelect({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transitions, setTransitions] = useState<StatusTransition[]>([]);
+  const [pendingDone, setPendingDone] = useState<PendingDone | null>(null);
+  const [timeInput, setTimeInput] = useState("");
+  const [timeError, setTimeError] = useState<string | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const timeInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -60,6 +91,18 @@ export function StatusSelect({
     };
   }, [open, issueKey]);
 
+  useEffect(() => {
+    if (!open) {
+      setPendingDone(null);
+      setTimeError(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!pendingDone) return;
+    requestAnimationFrame(() => timeInputRef.current?.focus());
+  }, [pendingDone]);
+
   useLayoutEffect(() => {
     if (!open || !btnRef.current) {
       setPos(null);
@@ -70,8 +113,8 @@ export function StatusSelect({
       const menu = menuRef.current;
       if (!btn) return;
       const r = btn.getBoundingClientRect();
-      const menuW = menu?.offsetWidth || 220;
-      const menuH = menu?.offsetHeight || 260;
+      const menuW = menu?.offsetWidth || 240;
+      const menuH = menu?.offsetHeight || 280;
       const gap = 4;
       let top = r.bottom + gap;
       let left = r.left;
@@ -91,7 +134,7 @@ export function StatusSelect({
       window.removeEventListener("scroll", place, true);
       window.removeEventListener("resize", place);
     };
-  }, [open, loading, transitions.length, error]);
+  }, [open, loading, transitions.length, error, pendingDone, timeError]);
 
   useEffect(() => {
     if (!open) return;
@@ -102,7 +145,14 @@ export function StatusSelect({
       setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        if (pendingDone) {
+          setPendingDone(null);
+          setTimeError(null);
+        } else {
+          setOpen(false);
+        }
+      }
     }
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -110,7 +160,45 @@ export function StatusSelect({
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, pendingDone]);
+
+  function selectTransition(tr: StatusTransition) {
+    if (isDoneLikeStatus(tr.to.name)) {
+      const suggested = `${Math.max(1, Math.round(durationDays || 1))}d`;
+      setPendingDone({
+        transitionId: tr.id,
+        status: tr.to.name,
+        transitionName: tr.name,
+      });
+      setTimeInput(timeSpent?.trim() || suggested);
+      setTimeError(null);
+      return;
+    }
+    onChange({ status: tr.to.name, transitionId: tr.id, timeSpent: null });
+    setOpen(false);
+  }
+
+  function confirmDoneTime() {
+    if (!pendingDone) return;
+    const value = timeInput.trim();
+    if (!isValidTimeSpent(value)) {
+      setTimeError("Enter time like 3d, 4h, or 2d 4h");
+      return;
+    }
+    onChange({
+      status: pendingDone.status,
+      transitionId: pendingDone.transitionId,
+      timeSpent: value.replace(/\s+/g, " "),
+    });
+    setPendingDone(null);
+    setOpen(false);
+  }
+
+  const title = transitionId
+    ? timeSpent
+      ? `${status} (will Push · actual ${timeSpent})`
+      : `${status} (will Push)`
+    : `Status: ${status}. Click to change.`;
 
   return (
     <div className="pg-status-wrap" data-status-menu={issueKey}>
@@ -118,7 +206,7 @@ export function StatusSelect({
         ref={btnRef}
         type="button"
         className={`pg-status-pill editable ${statusClass(status || "")}${transitionId ? " dirty" : ""}`}
-        title={transitionId ? `${status} (will Push)` : `Status: ${status}. Click to change.`}
+        title={title}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >
@@ -136,38 +224,93 @@ export function StatusSelect({
                 : { top: 0, left: 0, visibility: "hidden" }
             }
           >
-            <div className="pg-assign-hint">Change status</div>
-            <button
-              type="button"
-              className={`pg-status-option${!transitionId ? " current" : ""}`}
-              onClick={() => {
-                onChange({ status: pulledStatus, transitionId: null });
-                setOpen(false);
-              }}
-            >
-              {pulledStatus}
-              <span className="pg-status-meta">current in Jira</span>
-            </button>
-            {loading && <div className="pg-status-meta pad">Loading transitions…</div>}
-            {error && <div className="pg-status-meta pad error">{error}</div>}
-            {!loading &&
-              !error &&
-              transitions.map((tr) => (
+            {pendingDone ? (
+              <>
+                <div className="pg-assign-hint">Actual time spent</div>
+                <p className="pg-status-time-copy">
+                  Moving to <strong>{pendingDone.status}</strong> requires actual
+                  time spent on this story.
+                </p>
+                <label className="pg-status-time-field">
+                  Time spent
+                  <input
+                    ref={timeInputRef}
+                    type="text"
+                    value={timeInput}
+                    onChange={(e) => {
+                      setTimeInput(e.target.value);
+                      setTimeError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        confirmDoneTime();
+                      }
+                    }}
+                    placeholder="e.g. 3d or 2d 4h"
+                    spellCheck={false}
+                  />
+                </label>
+                {timeError && <div className="pg-status-meta pad error">{timeError}</div>}
+                <div className="pg-status-meta pad">
+                  Suggested from duration: {Math.max(1, Math.round(durationDays || 1))}d
+                </div>
+                <div className="pg-status-time-actions">
+                  <button
+                    type="button"
+                    className="gantt-btn"
+                    onClick={() => {
+                      setPendingDone(null);
+                      setTimeError(null);
+                    }}
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    className="gantt-btn primary"
+                    onClick={confirmDoneTime}
+                  >
+                    Confirm
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="pg-assign-hint">Change status</div>
                 <button
                   type="button"
-                  key={tr.id}
-                  className={`pg-status-option${transitionId === tr.id ? " current" : ""}`}
+                  className={`pg-status-option${!transitionId ? " current" : ""}`}
                   onClick={() => {
-                    onChange({ status: tr.to.name, transitionId: tr.id });
+                    onChange({ status: pulledStatus, transitionId: null, timeSpent: null });
                     setOpen(false);
                   }}
                 >
-                  {tr.to.name}
-                  <span className="pg-status-meta">{tr.name}</span>
+                  {pulledStatus}
+                  <span className="pg-status-meta">current in Jira</span>
                 </button>
-              ))}
-            {!loading && !error && transitions.length === 0 && (
-              <div className="pg-status-meta pad">No transitions available</div>
+                {loading && <div className="pg-status-meta pad">Loading transitions…</div>}
+                {error && <div className="pg-status-meta pad error">{error}</div>}
+                {!loading &&
+                  !error &&
+                  transitions.map((tr) => (
+                    <button
+                      type="button"
+                      key={tr.id}
+                      className={`pg-status-option${transitionId === tr.id ? " current" : ""}`}
+                      onClick={() => selectTransition(tr)}
+                    >
+                      {tr.to.name}
+                      <span className="pg-status-meta">
+                        {tr.name}
+                        {isDoneLikeStatus(tr.to.name) ? " · asks for time" : ""}
+                      </span>
+                    </button>
+                  ))}
+                {!loading && !error && transitions.length === 0 && (
+                  <div className="pg-status-meta pad">No transitions available</div>
+                )}
+              </>
             )}
           </div>,
           document.body,
