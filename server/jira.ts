@@ -543,6 +543,89 @@ function projectKeyFromIssueKey(issueKey: string): string {
   return i > 0 ? issueKey.slice(0, i) : issueKey;
 }
 
+function worklogStartedIso(startYmd: string | null | undefined): string {
+  const ymd = startYmd && /^\d{4}-\d{2}-\d{2}$/.test(startYmd)
+    ? startYmd
+    : new Date().toISOString().slice(0, 10);
+  return `${ymd}T09:00:00.000+0000`;
+}
+
+/** Transition payload — includes actual time spent when closing as Done. */
+function buildTransitionBody(item: PushItem): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    transition: { id: item.transitionId },
+  };
+  if (!item.timeSpent) return body;
+  body.update = {
+    worklog: [
+      {
+        add: {
+          timeSpent: item.timeSpent,
+          started: worklogStartedIso(item.start),
+        },
+      },
+    ],
+  };
+  body.fields = {
+    timetracking: { remainingEstimate: "0m" },
+  };
+  return body;
+}
+
+async function addWorklog(
+  issueKey: string,
+  timeSpent: string,
+  startYmd: string | null | undefined,
+): Promise<{ ok: boolean; message?: string }> {
+  const res = await jiraFetch(
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/worklog`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        timeSpent,
+        started: worklogStartedIso(startYmd),
+      }),
+    },
+  );
+  if (res.ok) return { ok: true };
+  return {
+    ok: false,
+    message: `worklog failed (${res.status}): ${(await res.text()).slice(0, 200)}`,
+  };
+}
+
+/** Transition to the target status; for Done, log actual time spent first. */
+async function transitionIssue(item: PushItem): Promise<string | null> {
+  const key = item.key;
+  const transitionId = item.transitionId!;
+  const withTime = buildTransitionBody(item);
+
+  let res = await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
+    method: "POST",
+    body: JSON.stringify(withTime),
+  });
+  if (res.ok || res.status === 204) return null;
+
+  const firstErr = `status transition failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
+  if (!item.timeSpent) return firstErr;
+
+  // Some workflows reject worklog-in-transition — log separately, then transition.
+  const logged = await addWorklog(key, item.timeSpent, item.start);
+  if (!logged.ok) {
+    return `${firstErr} · ${logged.message || "could not log actual time"}`;
+  }
+
+  res = await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
+    method: "POST",
+    body: JSON.stringify({
+      transition: { id: transitionId },
+      fields: { timetracking: { remainingEstimate: "0m" } },
+    }),
+  });
+  if (res.ok || res.status === 204) return null;
+  return `status transition failed after worklog (${res.status}): ${(await res.text()).slice(0, 300)}`;
+}
+
 async function createIssueInJira(
   item: PushItem,
   fieldMap: FieldMap,
@@ -687,19 +770,12 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
       }
 
       if (item.transitionId) {
-        const trRes = await jiraFetch(
-          `/rest/api/3/issue/${encodeURIComponent(item.key)}/transitions`,
-          {
-            method: "POST",
-            body: JSON.stringify({ transition: { id: item.transitionId } }),
-          },
-        );
-        if (!trRes.ok && trRes.status !== 204) {
-          const text = await trRes.text();
+        const trErr = await transitionIssue(item);
+        if (trErr) {
           results.push({
             key: item.key,
             status: "error",
-            message: `status transition failed (${trRes.status}): ${text.slice(0, 300)}`,
+            message: trErr,
           });
           continue;
         }

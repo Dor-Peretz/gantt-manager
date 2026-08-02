@@ -47,6 +47,17 @@ function assigneeAccountIdForPush(t: GanttTask): string | null | undefined {
   return id.slice(5);
 }
 
+function isDoneLikeStatus(status: string | null | undefined): boolean {
+  return /done|closed|resolved|complete|ship/i.test(status || "");
+}
+
+/** Jira timeSpent string for Done transitions (working days from the gantt). */
+function timeSpentForPush(t: GanttTask): string | null {
+  if (t.pendingCreate || !t.transitionId || !isDoneLikeStatus(t.status)) return null;
+  const days = Math.max(1, Math.round(t.durationDays || 1));
+  return `${days}d`;
+}
+
 function applyTheme(theme: ThemeMode) {
   document.documentElement.setAttribute("data-theme", theme);
 }
@@ -505,6 +516,7 @@ export default function App() {
           jiraUpdated: t.jiraUpdated,
           transitionId: t.pendingCreate ? null : t.transitionId || null,
           status: t.status,
+          timeSpent: timeSpentForPush(t),
           assigneeAccountId: assigneeAccountIdForPush(t),
           create: t.pendingCreate
             ? {
@@ -928,7 +940,7 @@ export default function App() {
           className={`gantt-btn${dirtyTasks.length ? " warn" : ""}${busy === "push" ? " is-busy" : ""}`}
           disabled={busy !== null || dirtyTasks.length === 0}
           onClick={() => void onPush()}
-          title="Create draft tasks in Jira and write Start/Due/status/assignee for dirty items"
+          title="Create draft tasks in Jira and write Start/Due/status/assignee. Done transitions also log actual time (duration as worklog)."
         >
           {busy === "push" ? (
             <>

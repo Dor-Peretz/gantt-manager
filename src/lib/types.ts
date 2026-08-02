@@ -153,6 +153,11 @@ export interface PushItem {
   /** When set, Push will transition the issue to this status */
   transitionId?: string | null;
   status?: string | null;
+  /**
+   * Actual time spent to log when transitioning to Done (Jira timeSpent, e.g. "3d").
+   * Required by many Done validators — derived from durationDays.
+   */
+  timeSpent?: string | null;
   /** Jira account id to assign (null = unassign). Omit to leave assignee unchanged. */
   assigneeAccountId?: string | null;
   /** When set, create a new Jira issue instead of updating an existing one */
