@@ -21,6 +21,10 @@ export interface GanttTask {
   status: string;
   /** Status name as of last Pull (to detect status edits) */
   pulledStatus: string;
+  /** Schedule as of last Pull/Push — used to discard local edits */
+  pulledStart?: string | null;
+  pulledDue?: string | null;
+  pulledDurationDays?: number;
   /** Jira transition id to apply on Push (when status changed) */
   transitionId?: string | null;
   assignee: string | null;

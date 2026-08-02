@@ -126,6 +126,9 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
             durationDays: d.scheduleDirty ? d.durationDays : t.durationDays,
             status: d.statusDirty ? d.status : t.status,
             pulledStatus: t.pulledStatus || t.status,
+            pulledStart: t.pulledStart ?? t.start,
+            pulledDue: t.pulledDue ?? t.due,
+            pulledDurationDays: t.pulledDurationDays ?? t.durationDays,
             transitionId: d.statusDirty ? d.transitionId ?? null : null,
             resourceIds: d.assigneeDirty ? d.resourceIds : t.resourceIds,
             assignee: d.assigneeDirty ? d.assignee : t.assignee,
@@ -437,6 +440,52 @@ export default function App() {
     await runPull(jql, { previous: modelRef.current });
   }
 
+  function onClearChanges() {
+    if (!dirtyTasks.length) return;
+    const drafts = dirtyTasks.filter((t) => t.pendingCreate).length;
+    const edits = dirtyTasks.length - drafts;
+    const msg =
+      drafts && edits
+        ? `Discard ${edits} unpushed edit(s) and ${drafts} draft task(s)?`
+        : drafts
+          ? `Discard ${drafts} draft task(s)?`
+          : `Discard ${edits} unpushed edit(s)?`;
+    if (!window.confirm(msg)) return;
+
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks
+          .filter((t) => !t.pendingCreate)
+          .map((t) => {
+            if (t.localOnly || !t.dirty) return t;
+            const resourceIds = [...(t.pulledResourceIds ?? [])];
+            const resource = resourceIds[0]
+              ? prev.resources.find((r) => r.id === resourceIds[0])
+              : null;
+            return {
+              ...t,
+              start: t.pulledStart !== undefined ? t.pulledStart : t.start,
+              due: t.pulledDue !== undefined ? t.pulledDue : t.due,
+              durationDays: t.pulledDurationDays ?? t.durationDays,
+              status: t.pulledStatus || t.status,
+              transitionId: null,
+              resourceIds,
+              assignee: resource?.name ?? null,
+              scheduleDirty: false,
+              statusDirty: false,
+              assigneeDirty: false,
+              dirty: false,
+            };
+          }),
+      })),
+    }));
+    setPushResults(null);
+    setError(null);
+    setStatus("Local changes cleared");
+  }
+
   async function onPush() {
     if (!dirtyTasks.length) return;
     setBusy("push");
@@ -490,6 +539,9 @@ export default function App() {
                 assigneeDirty: false,
                 transitionId: null,
                 pulledStatus: t.status,
+                pulledStart: t.start,
+                pulledDue: t.due,
+                pulledDurationDays: t.durationDays,
                 pulledResourceIds: [...(t.resourceIds || [])],
                 jiraUpdated: r.jiraUpdated || t.jiraUpdated,
               };
@@ -527,6 +579,10 @@ export default function App() {
           const next = {
             ...t,
             ...patch,
+            // Snapshot last-pulled schedule on first local edit so Clear can restore it.
+            pulledStart: t.pulledStart !== undefined ? t.pulledStart : t.start,
+            pulledDue: t.pulledDue !== undefined ? t.pulledDue : t.due,
+            pulledDurationDays: t.pulledDurationDays ?? t.durationDays,
             scheduleDirty,
             dirty: !!(scheduleDirty || t.statusDirty || t.assigneeDirty),
           };
@@ -882,6 +938,15 @@ export default function App() {
           ) : (
             `Push${dirtyTasks.length ? ` (${dirtyTasks.length})` : ""}`
           )}
+        </button>
+        <button
+          type="button"
+          className="gantt-btn"
+          disabled={busy !== null || dirtyTasks.length === 0}
+          onClick={onClearChanges}
+          title="Discard unpushed edits and draft tasks (keeps local milestones)"
+        >
+          Clear
         </button>
         <button
           type="button"

@@ -14,6 +14,7 @@ import {
   firstWorkingDay,
   formatYmd,
   parseYmd,
+  todayLocal,
 } from "../lib/workdays";
 import { AssignMenu } from "./AssignMenu";
 import { EpicColorPicker } from "./EpicColorPicker";
@@ -44,6 +45,79 @@ const RES_DOCK_MIN = 96;
 const RES_DOCK_MAX = 560;
 /** # + Start + Dur + Status + Res (name column gets the rest) */
 const LEFT_FIXED_OTHER = 48 + 108 + 78 + 108 + 100;
+
+function isDoneStatus(status: string): boolean {
+  return /done|closed|resolved|complete|ship/i.test(status || "");
+}
+
+/** Still waiting to start (Ready for Dev / To Do / etc). */
+function isReadyForDevStatus(status: string): boolean {
+  const s = (status || "").toLowerCase();
+  return /ready\s*for\s*dev|ready\s*for\s*development|selected for development|to\s*do|^todo$|backlog|^open$/i.test(
+    s,
+  );
+}
+
+/** Past due date and not in a done-like status. */
+function isOverdue(t: GanttTask | undefined | null): boolean {
+  if (!t || t.localOnly || t.isMarker || !t.due) return false;
+  if (isDoneStatus(t.status)) return false;
+  return t.due < formatYmd(todayLocal());
+}
+
+/** Start date has passed but status is still Ready for Dev / not started. */
+function isStartLate(t: GanttTask | undefined | null): boolean {
+  if (!t || t.localOnly || t.isMarker || !t.start) return false;
+  if (isDoneStatus(t.status)) return false;
+  if (!isReadyForDevStatus(t.status)) return false;
+  return t.start < formatYmd(todayLocal());
+}
+
+function OverdueIcon({ due }: { due: string }) {
+  return (
+    <span
+      className="pg-overdue-icon"
+      title={`Overdue — due ${due}`}
+      aria-label={`Overdue — due ${due}`}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden>
+        <path
+          fill="currentColor"
+          d="M12 3.2 1.8 20.5a1 1 0 0 0 .87 1.5h18.66a1 1 0 0 0 .87-1.5L12 3.2Zm0 5.3a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0v-5a1 1 0 0 1 1-1Zm0 9.5a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5Z"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function StartLateIcon({ start, status }: { start: string; status: string }) {
+  return (
+    <span
+      className="pg-start-late-icon"
+      title={`Should have started ${start} — still “${status}”`}
+      aria-label={`Should have started ${start} — still ${status}`}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden>
+        <path
+          fill="currentColor"
+          d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8Zm.75-12.5h-1.5v5.25l4.5 2.7.75-1.23-3.75-2.22Z"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function TaskWarnIcons({ task }: { task: GanttTask | undefined | null }) {
+  if (!task) return null;
+  return (
+    <>
+      {isOverdue(task) && task.due ? <OverdueIcon due={task.due} /> : null}
+      {isStartLate(task) && task.start ? (
+        <StartLateIcon start={task.start} status={task.status} />
+      ) : null}
+    </>
+  );
+}
 
 type Pt = [number, number];
 
@@ -737,6 +811,7 @@ export function GanttBoard({
                             </a>
                           )}
                           {r.milestone.title}
+                          <TaskWarnIcons task={epicSelf} />
                         </span>
                         <span className="pg-owner">
                           {isLocalMs
@@ -951,6 +1026,8 @@ export function GanttBoard({
                     ) : msGeo ? (
                       <div
                         className={`pg-bar milestone-bar${
+                          isOverdue(epicSelf) ? " overdue" : ""
+                        }${isStartLate(epicSelf) ? " start-late" : ""}${
                           epicSelf && drag?.taskId === epicSelf.id
                             ? drag.kind === "resize"
                               ? " resizing"
@@ -962,6 +1039,13 @@ export function GanttBoard({
                           width: msGeo.width,
                           background: r.milestone.color,
                         }}
+                        title={
+                          isOverdue(epicSelf) && epicSelf?.due
+                            ? `Overdue — due ${epicSelf.due}`
+                            : isStartLate(epicSelf) && epicSelf
+                              ? `Should have started ${epicSelf.start} — still “${epicSelf.status}”`
+                              : undefined
+                        }
                         onPointerDown={
                           epicSelf?.start
                             ? (e) => {
@@ -987,6 +1071,15 @@ export function GanttBoard({
                                 ? `${epicSelf.estDays}sp`
                                 : r.milestone.id}
                             </span>
+                            {isOverdue(epicSelf) ? (
+                              <span className="pg-bar-overdue" aria-hidden>
+                                !
+                              </span>
+                            ) : isStartLate(epicSelf) ? (
+                              <span className="pg-bar-start-late" aria-hidden>
+                                S
+                              </span>
+                            ) : null}
                             {epicSelf.start && (
                               <span
                                 className="pg-bar-handle"
@@ -1111,6 +1204,7 @@ export function GanttBoard({
                           </a>
                         )}
                         {t.title}
+                        <TaskWarnIcons task={t} />
                       </span>
                       <span className="pg-owner">
                         {t.localOnly
@@ -1321,12 +1415,27 @@ export function GanttBoard({
                     })()
                   ) : geo ? (
                     <div
-                      className={`pg-bar${drag?.taskId === t.id ? (drag.kind === "resize" ? " resizing" : " dragging") : ""}`}
+                      className={`pg-bar${
+                        isOverdue(t) ? " overdue" : ""
+                      }${isStartLate(t) ? " start-late" : ""}${
+                        drag?.taskId === t.id
+                          ? drag.kind === "resize"
+                            ? " resizing"
+                            : " dragging"
+                          : ""
+                      }`}
                       style={{
                         left: geo.left,
                         width: geo.width,
                         background: colorForTask(t),
                       }}
+                      title={
+                        isOverdue(t) && t.due
+                          ? `Overdue — due ${t.due}`
+                          : isStartLate(t)
+                            ? `Should have started ${t.start} — still “${t.status}”`
+                            : undefined
+                      }
                       onPointerDown={(e) => {
                         if (!t.start) return;
                         beginDrag(
@@ -1343,6 +1452,15 @@ export function GanttBoard({
                       }}
                     >
                       <span className="pg-bar-label">{t.friendlyId}</span>
+                      {isOverdue(t) ? (
+                        <span className="pg-bar-overdue" aria-hidden>
+                          !
+                        </span>
+                      ) : isStartLate(t) ? (
+                        <span className="pg-bar-start-late" aria-hidden>
+                          S
+                        </span>
+                      ) : null}
                       <span
                         className="pg-bar-handle"
                         onPointerDown={(e) => {
