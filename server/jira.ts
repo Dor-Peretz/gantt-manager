@@ -367,6 +367,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   function resourceFromAssignee(assignee: {
     accountId?: string;
     displayName?: string;
+    avatarUrls?: Record<string, string>;
   } | null): string | null {
     if (!assignee?.accountId) return null;
     const id = `jira:${assignee.accountId}`;
@@ -374,12 +375,16 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       const name = assignee.displayName || assignee.accountId;
       const color = prevColor.get(id) || colorForAssignee(assignee.accountId, usedColors);
       if (prevColor.has(id)) usedColors.add(color);
+      const urls = assignee.avatarUrls || {};
+      const avatarUrl =
+        urls["48x48"] || urls["32x32"] || urls["24x24"] || urls["16x16"] || null;
       resourceById.set(id, {
         id,
         name,
         team: "Jira assignee",
         color,
         initials: initialsFromName(name),
+        avatarUrl,
       });
     }
     return id;
@@ -476,10 +481,14 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     });
   }
 
-  // Restore saved milestone-marker flags.
+  // Restore saved milestone-marker + hidden flags.
   const savedMarkers = local.markers || {};
+  const savedHidden = local.hiddenTasks || {};
   for (const m of milestones) {
-    for (const t of m.tasks) t.isMarker = savedMarkers[t.id] === true;
+    for (const t of m.tasks) {
+      t.isMarker = savedMarkers[t.id] === true;
+      t.hidden = savedHidden[t.id] === true;
+    }
   }
 
   // Apply saved manual task order; unknown/new tasks keep Jira order at the end.
@@ -530,6 +539,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     resources,
     milestones,
     pulledAt: new Date().toISOString(),
+    hiddenFolderCollapsed: local.hiddenFolderCollapsed !== false,
   };
 }
 
@@ -564,6 +574,69 @@ export async function getTransitions(issueKey: string): Promise<JiraTransition[]
 function projectKeyFromIssueKey(issueKey: string): string {
   const i = issueKey.lastIndexOf("-");
   return i > 0 ? issueKey.slice(0, i) : issueKey;
+}
+
+/** Plain text → Atlassian Document Format for the Description field. */
+function adfParagraph(text: string): Record<string, unknown> {
+  const body = text.trim() || "Created from Gantt Manager.";
+  return {
+    type: "doc",
+    version: 1,
+    content: [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: body }],
+      },
+    ],
+  };
+}
+
+/**
+ * Standard story-level types for this project (hierarchyLevel 0, not subtasks).
+ * Prefer Story / Eng Story / Task when present; never invent types Jira rejects.
+ */
+async function creatableIssueTypeNames(projectKey: string): Promise<string[]> {
+  const preferred = ["Story", "Eng Story", "Task"];
+  try {
+    const res = await jiraFetch(
+      `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
+    );
+    if (!res.ok) throw new Error(`createmeta ${res.status}`);
+    const data = (await res.json()) as {
+      issueTypes?: Array<{ name?: string; subtask?: boolean; hierarchyLevel?: number }>;
+    };
+    const available = (data.issueTypes || [])
+      .filter((t) => t.name && !t.subtask && (t.hierarchyLevel ?? 0) === 0)
+      .map((t) => t.name!);
+    const ranked = [
+      ...preferred.filter((n) => available.includes(n)),
+      ...available.filter((n) => !preferred.includes(n)),
+    ];
+    if (ranked.length) return ranked;
+  } catch {
+    // fall through
+  }
+  return preferred;
+}
+
+/** Team id string from the parent epic when the project requires Team on create. */
+async function teamIdFromEpic(
+  epicKey: string,
+  teamField: string,
+): Promise<string | null> {
+  try {
+    const res = await jiraFetch(
+      `/rest/api/3/issue/${encodeURIComponent(epicKey)}?fields=${encodeURIComponent(teamField)}`,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { fields?: Record<string, unknown> };
+    const team = data.fields?.[teamField] as { id?: string } | string | null | undefined;
+    if (typeof team === "string" && team) return team;
+    if (team && typeof team === "object" && typeof team.id === "string") return team.id;
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 function worklogStartedIso(startYmd: string | null | undefined): string {
@@ -655,40 +728,47 @@ async function createIssueInJira(
 ): Promise<PushResult> {
   const create = item.create!;
   const projectKey = projectKeyFromIssueKey(create.epicKey);
-  const issueTypes = ["Story", "Task"];
+  const issueTypes = await creatableIssueTypeNames(projectKey);
+  const teamId = await teamIdFromEpic(create.epicKey, fieldMap.team);
   let lastError = "create failed";
+
+  const sp =
+    item.storyPoints != null && Number.isFinite(item.storyPoints) && item.storyPoints > 0
+      ? Math.max(1, Math.round(item.storyPoints))
+      : null;
+
+  // SBT (and similar schemes) require Description + Priority; Team is often
+  // enforced by a validator even when createmeta marks it optional.
+  const baseFields: Record<string, unknown> = {
+    project: { key: projectKey },
+    summary: create.summary,
+    description: adfParagraph(create.summary),
+    priority: { name: "Medium" },
+    [fieldMap.startDate]: item.start,
+    duedate: item.due,
+    ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
+    ...(teamId ? { [fieldMap.team]: teamId } : {}),
+  };
+  if (item.assigneeAccountId) {
+    baseFields.assignee = { accountId: item.assigneeAccountId };
+  }
 
   for (const typeName of issueTypes) {
     // Prefer parent (next-gen / hierarchy); fall back to Epic Link (classic).
-    const sp =
-      item.storyPoints != null && Number.isFinite(item.storyPoints) && item.storyPoints > 0
-        ? Math.max(1, Math.round(item.storyPoints))
-        : null;
     const attempts: Array<Record<string, unknown>> = [
       {
-        project: { key: projectKey },
-        summary: create.summary,
+        ...baseFields,
         issuetype: { name: typeName },
         parent: { key: create.epicKey },
-        [fieldMap.startDate]: item.start,
-        duedate: item.due,
-        ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
       },
       {
-        project: { key: projectKey },
-        summary: create.summary,
+        ...baseFields,
         issuetype: { name: typeName },
         [fieldMap.epicLink]: create.epicKey,
-        [fieldMap.startDate]: item.start,
-        duedate: item.due,
-        ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
       },
     ];
 
     for (const fields of attempts) {
-      if (item.assigneeAccountId) {
-        fields.assignee = { accountId: item.assigneeAccountId };
-      }
       const res = await jiraFetch("/rest/api/3/issue", {
         method: "POST",
         body: JSON.stringify({ fields }),
@@ -721,8 +801,13 @@ async function createIssueInJira(
           message: `Created ${createdKey} under ${create.epicKey}`,
         };
       }
-      lastError = `create failed (${res.status}): ${(await res.text()).slice(0, 400)}`;
-      // Try next shape / issue type
+      const body = (await res.text()).slice(0, 400);
+      const msg = `create failed (${res.status}): ${body}`;
+      // Keep the first meaningful failure (e.g. Description/Team) rather than
+      // overwriting with a later "invalid issue type" from a fallback type.
+      if (lastError === "create failed" || !/issuetype/i.test(body)) {
+        lastError = msg;
+      }
     }
   }
 
@@ -841,7 +926,12 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
   return results;
 }
 
-export async function healthCheck(): Promise<{ ok: boolean; site?: string; error?: string }> {
+export async function healthCheck(): Promise<{
+  ok: boolean;
+  site?: string;
+  displayName?: string;
+  error?: string;
+}> {
   try {
     requireEnv("JIRA_BASE_URL");
     requireEnv("JIRA_EMAIL");
@@ -849,7 +939,8 @@ export async function healthCheck(): Promise<{ ok: boolean; site?: string; error
     const res = await jiraFetch("/rest/api/3/myself");
     if (!res.ok) return { ok: false, error: `auth failed (${res.status})` };
     const me = (await res.json()) as { displayName?: string };
-    return { ok: true, site: `${baseUrl()} as ${me.displayName || "user"}` };
+    const displayName = me.displayName || "user";
+    return { ok: true, displayName, site: `${baseUrl()} as ${displayName}` };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

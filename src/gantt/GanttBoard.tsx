@@ -205,6 +205,8 @@ interface Props {
     place: "before" | "after",
   ) => void;
   onToggleMarker: (taskId: string) => void;
+  onToggleHidden: (taskId: string) => void;
+  onToggleHiddenFolder: () => void;
   onDeleteLocalMilestone: (taskId: string) => void;
   onDeleteDraftTask: (taskId: string) => void;
   onLayoutChange: (patch: Partial<GanttModel>) => void;
@@ -247,6 +249,8 @@ export function GanttBoard({
   onReorderMilestone,
   onReorderTask,
   onToggleMarker,
+  onToggleHidden,
+  onToggleHiddenFolder,
   onDeleteLocalMilestone,
   onDeleteDraftTask,
   onLayoutChange,
@@ -331,7 +335,10 @@ export function GanttBoard({
     [model.milestones, model.projectStart, holidaysOn],
   );
   const days = useMemo(() => buildDays(start, end, holidaysOn), [start, end, holidaysOn]);
-  const rows = useMemo(() => buildRows(model.milestones), [model.milestones]);
+  const rows = useMemo(
+    () => buildRows(model.milestones, model.hiddenFolderCollapsed !== false),
+    [model.milestones, model.hiddenFolderCollapsed],
+  );
   const trackW = days.length * dayWidth;
   const canvasH = 52 + rows.length * ROW_H;
 
@@ -669,17 +676,22 @@ export function GanttBoard({
           {/* Body rows */}
           {rows.map((r) => {
             if (r.kind === "milestone") {
-              const isLocalMs = !!r.milestone.localOnly;
-              const epicSelf = r.milestone.tasks.find((t) =>
-                isEpicSelfTask(r.milestone.id, t),
-              );
-              const childCount = r.milestone.tasks.filter(
-                (t) => !isEpicSelfTask(r.milestone.id, t),
-              ).length;
-              const span = milestoneSpan(r.milestone, holidaysOn);
+              const isHiddenFolder = !!r.isHiddenFolder;
+              const isLocalMs = !!r.milestone.localOnly && !isHiddenFolder;
+              const epicSelf = isHiddenFolder
+                ? undefined
+                : r.milestone.tasks.find((t) => isEpicSelfTask(r.milestone.id, t));
+              const childCount = isHiddenFolder
+                ? r.milestone.tasks.length
+                : r.milestone.tasks.filter(
+                    (t) => !isEpicSelfTask(r.milestone.id, t) && !t.hidden,
+                  ).length;
+              const span = isHiddenFolder ? null : milestoneSpan(r.milestone, holidaysOn);
               // Use calendar-day bar for multi-task milestone summary; workday bar for epic self.
               const msGeo =
-                !isLocalMs && epicSelf?.start
+                isHiddenFolder
+                  ? null
+                  : !isLocalMs && epicSelf?.start
                   ? barGeometry(
                       days,
                       epicSelf.start,
@@ -704,7 +716,12 @@ export function GanttBoard({
                   ? markerLeft(days, localDate, dayWidth)
                   : null;
               const canPlaceEpicSelf =
-                !preview && !!epicSelf && !epicSelf.start && !isLocalMs && !msGeo;
+                !preview &&
+                !!epicSelf &&
+                !epicSelf.start &&
+                !isLocalMs &&
+                !isHiddenFolder &&
+                !msGeo;
               const epicPlaceGhost =
                 canPlaceEpicSelf &&
                 placeHover?.taskId === epicSelf.id &&
@@ -718,15 +735,17 @@ export function GanttBoard({
               return (
                 <div
                   className={`pg-row milestone${isLocalMs ? " local-ms" : ""}${
-                    epicSelf?.dirty ? " dirty" : ""
-                  }${msDrag === r.milestone.id ? " row-dragging" : ""}${
-                    msDropTarget?.id === r.milestone.id
+                    isHiddenFolder ? " hidden-folder" : ""
+                  }${epicSelf?.dirty ? " dirty" : ""}${
+                    !isHiddenFolder && msDrag === r.milestone.id ? " row-dragging" : ""
+                  }${
+                    !isHiddenFolder && msDropTarget?.id === r.milestone.id
                       ? ` drop-${msDropTarget.place}`
                       : ""
                   }`}
                   key={`ms-${r.milestone.id}`}
                   onDragOver={(e) => {
-                    if (!msDrag) return;
+                    if (!msDrag || isHiddenFolder) return;
                     e.preventDefault();
                     e.dataTransfer.dropEffect = "move";
                     const rect = e.currentTarget.getBoundingClientRect();
@@ -740,7 +759,7 @@ export function GanttBoard({
                     }
                   }}
                   onDrop={(e) => {
-                    if (!msDrag) return;
+                    if (!msDrag || isHiddenFolder) return;
                     e.preventDefault();
                     const rect = e.currentTarget.getBoundingClientRect();
                     const place: "before" | "after" =
@@ -752,30 +771,45 @@ export function GanttBoard({
                 >
                   <div className="pg-fixed">
                     <div className="pg-col-num">
-                      <span
-                        className="pg-drag-handle"
-                        draggable
-                        title={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
-                        aria-label={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
-                        onDragStart={(e) => {
-                          setMsDrag(r.milestone.id);
-                          e.dataTransfer.effectAllowed = "move";
-                          e.dataTransfer.setData("text/plain", r.milestone.id);
-                        }}
-                        onDragEnd={() => {
-                          setMsDrag(null);
-                          setMsDropTarget(null);
-                        }}
-                      >
-                        ⠿
+                      {isHiddenFolder ? (
+                        <span className="pg-drag-handle pg-drag-handle-spacer" />
+                      ) : (
+                        <span
+                          className="pg-drag-handle"
+                          draggable
+                          title={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
+                          aria-label={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
+                          onDragStart={(e) => {
+                            setMsDrag(r.milestone.id);
+                            e.dataTransfer.effectAllowed = "move";
+                            e.dataTransfer.setData("text/plain", r.milestone.id);
+                          }}
+                          onDragEnd={() => {
+                            setMsDrag(null);
+                            setMsDropTarget(null);
+                          }}
+                        >
+                          ⠿
+                        </span>
+                      )}
+                      <span className="pg-col-num-id">
+                        {isHiddenFolder ? "⊘" : isLocalMs ? "★" : childCount}
                       </span>
-                      <span className="pg-col-num-id">{isLocalMs ? "★" : childCount}</span>
                       {epicSelf?.dirty ? (
                         <span className="pg-dirty-dot" title="Unpushed change" />
                       ) : null}
                     </div>
                     <div className="pg-col-name">
-                      {isLocalMs ? (
+                      {isHiddenFolder ? (
+                        <button
+                          type="button"
+                          className="pg-toggle"
+                          onClick={() => onToggleHiddenFolder()}
+                          aria-label="Toggle hidden folder"
+                        >
+                          {r.milestone.collapsed ? "▸" : "▾"}
+                        </button>
+                      ) : isLocalMs ? (
                         <span className="pg-toggle pg-toggle-spacer" />
                       ) : childCount > 0 ? (
                         <button
@@ -789,7 +823,11 @@ export function GanttBoard({
                       ) : (
                         <span className="pg-toggle pg-toggle-spacer" />
                       )}
-                      {isLocalMs ? (
+                      {isHiddenFolder ? (
+                        <span className="pg-hidden-folder-icon" title="Hidden tasks">
+                          ⊘
+                        </span>
+                      ) : isLocalMs ? (
                         <span className="pg-local-ms-bullet" title="Local milestone">
                           ★
                         </span>
@@ -804,7 +842,9 @@ export function GanttBoard({
                       )}
                       <div className="pg-name-stack">
                         <span className="pg-name-text" style={{ fontWeight: 700 }}>
-                          {isLocalMs ? (
+                          {isHiddenFolder ? (
+                            <span className="pg-hidden-folder-label">Folder</span>
+                          ) : isLocalMs ? (
                             <span className="pg-local-key">MS</span>
                           ) : (
                             <a
@@ -819,17 +859,19 @@ export function GanttBoard({
                           <TaskWarnIcons task={epicSelf} />
                         </span>
                         <span className="pg-owner">
-                          {isLocalMs
-                            ? "Local milestone · not synced to Jira"
-                            : epicSelf
-                              ? `${epicSelf.assignee ? `${epicSelf.assignee} · ` : ""}${
-                                  epicSelf.estDays != null ? `Est ${epicSelf.estDays}sp` : ""
-                                }${
-                                  epicSelf.owner && epicSelf.owner !== "—"
-                                    ? `${epicSelf.estDays != null ? " · " : ""}${epicSelf.owner}`
-                                    : ""
-                                }`
-                              : ""}
+                          {isHiddenFolder
+                            ? "Hidden from timeline · expand to show or unhide"
+                            : isLocalMs
+                              ? "Local milestone · not synced to Jira"
+                              : epicSelf
+                                ? `${epicSelf.assignee ? `${epicSelf.assignee} · ` : ""}${
+                                    epicSelf.estDays != null ? `Est ${epicSelf.estDays}sp` : ""
+                                  }${
+                                    epicSelf.owner && epicSelf.owner !== "—"
+                                      ? `${epicSelf.estDays != null ? " · " : ""}${epicSelf.owner}`
+                                      : ""
+                                  }`
+                                : ""}
                         </span>
                       </div>
                       {isLocalMs && (
@@ -1130,10 +1172,11 @@ export function GanttBoard({
             }
 
             const t = r.task!;
+            const inHiddenFolder = !!r.isHiddenFolder;
             const geo =
               t.start &&
               barGeometry(days, t.start, t.durationDays, holidaysOn, dayWidth);
-            const canPlace = !preview && !t.start && !t.isMarker;
+            const canPlace = !preview && !t.start && !t.isMarker && !inHiddenFolder;
             const placeGhost =
               canPlace &&
               placeHover?.taskId === t.id &&
@@ -1145,20 +1188,23 @@ export function GanttBoard({
                 dayWidth,
               );
 
-            const isRowDragging = rowDrag?.taskId === t.id;
+            const isRowDragging = !inHiddenFolder && rowDrag?.taskId === t.id;
             const dropCls =
-              rowDropTarget?.taskId === t.id && rowDrag?.milestoneId === r.milestone.id
+              !inHiddenFolder &&
+              rowDropTarget?.taskId === t.id &&
+              rowDrag?.milestoneId === r.milestone.id
                 ? ` drop-${rowDropTarget.place}`
                 : "";
 
             return (
               <div
                 className={`pg-row task${t.dirty ? " dirty" : ""}${
-                  isRowDragging ? " row-dragging" : ""
-                }${dropCls}`}
-                key={t.id}
+                  inHiddenFolder ? " is-hidden" : ""
+                }${isRowDragging ? " row-dragging" : ""}${dropCls}`}
+                key={inHiddenFolder ? `hidden-${t.id}` : t.id}
                 onDragOver={(e) => {
-                  if (!rowDrag || rowDrag.milestoneId !== r.milestone.id) return;
+                  if (inHiddenFolder || !rowDrag || rowDrag.milestoneId !== r.milestone.id)
+                    return;
                   e.preventDefault();
                   e.dataTransfer.dropEffect = "move";
                   const rect = e.currentTarget.getBoundingClientRect();
@@ -1169,7 +1215,8 @@ export function GanttBoard({
                   }
                 }}
                 onDrop={(e) => {
-                  if (!rowDrag || rowDrag.milestoneId !== r.milestone.id) return;
+                  if (inHiddenFolder || !rowDrag || rowDrag.milestoneId !== r.milestone.id)
+                    return;
                   e.preventDefault();
                   const rect = e.currentTarget.getBoundingClientRect();
                   const place: "before" | "after" =
@@ -1181,23 +1228,27 @@ export function GanttBoard({
               >
                 <div className="pg-fixed">
                   <div className="pg-col-num">
-                    <span
-                      className="pg-drag-handle"
-                      draggable
-                      title="Drag to reorder"
-                      aria-label="Drag to reorder task"
-                      onDragStart={(e) => {
-                        setRowDrag({ milestoneId: r.milestone.id, taskId: t.id });
-                        e.dataTransfer.effectAllowed = "move";
-                        e.dataTransfer.setData("text/plain", t.id);
-                      }}
-                      onDragEnd={() => {
-                        setRowDrag(null);
-                        setRowDropTarget(null);
-                      }}
-                    >
-                      ⠿
-                    </span>
+                    {inHiddenFolder ? (
+                      <span className="pg-drag-handle pg-drag-handle-spacer" />
+                    ) : (
+                      <span
+                        className="pg-drag-handle"
+                        draggable
+                        title="Drag to reorder"
+                        aria-label="Drag to reorder task"
+                        onDragStart={(e) => {
+                          setRowDrag({ milestoneId: r.milestone.id, taskId: t.id });
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", t.id);
+                        }}
+                        onDragEnd={() => {
+                          setRowDrag(null);
+                          setRowDropTarget(null);
+                        }}
+                      >
+                        ⠿
+                      </span>
+                    )}
                     <span className="pg-col-num-id">{t.friendlyId}</span>
                     {t.dirty ? <span className="pg-dirty-dot" title="Unpushed change" /> : null}
                   </div>
@@ -1229,52 +1280,68 @@ export function GanttBoard({
                         <TaskWarnIcons task={t} />
                       </span>
                       <span className="pg-owner">
-                        {t.localOnly
-                          ? "Local only · not synced to Jira"
-                          : t.pendingCreate
-                            ? `Draft · will create under ${t.createEpicId || "epic"} on Push`
-                            : `${t.assignee ? `${t.assignee} · ` : ""}${t.owner}`}
+                        {inHiddenFolder
+                          ? `Hidden · ${r.milestone.title}`
+                          : t.localOnly
+                            ? "Local only · not synced to Jira"
+                            : t.pendingCreate
+                              ? `Draft · will create under ${t.createEpicId || "epic"} on Push`
+                              : `${t.assignee ? `${t.assignee} · ` : ""}${t.owner}`}
                       </span>
                       {!t.localOnly && !t.pendingCreate && t.blockedBy.length > 0 && (
                         <span className="pg-prereq-hint">{t.blockedBy.join(", ")}</span>
                       )}
                     </div>
-                    {t.localOnly ? (
-                      <button
-                        type="button"
-                        className="pg-local-delete"
-                        title="Delete local milestone"
-                        aria-label="Delete local milestone"
-                        onClick={() => onDeleteLocalMilestone(t.id)}
-                      >
-                        ×
-                      </button>
-                    ) : t.pendingCreate ? (
-                      <button
-                        type="button"
-                        className="pg-local-delete"
-                        title="Delete draft task"
-                        aria-label="Delete draft task"
-                        onClick={() => onDeleteDraftTask(t.id)}
-                      >
-                        ×
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className={`pg-marker-toggle${t.isMarker ? " on" : ""}`}
-                        title={
-                          t.isMarker
-                            ? "Milestone marker — click to make it a normal bar"
-                            : "Mark as milestone (red star, no duration)"
-                        }
-                        aria-label="Toggle milestone marker"
-                        aria-pressed={!!t.isMarker}
-                        onClick={() => onToggleMarker(t.id)}
-                      >
-                        {t.isMarker ? "★" : "☆"}
-                      </button>
-                    )}
+                    <div className="pg-name-actions">
+                      {!t.localOnly && (
+                        <button
+                          type="button"
+                          className={`pg-hide-toggle${t.hidden ? " on" : ""}`}
+                          title={t.hidden ? "Show task in timeline" : "Hide task from timeline"}
+                          aria-label={t.hidden ? "Show task" : "Hide task"}
+                          aria-pressed={!!t.hidden}
+                          onClick={() => onToggleHidden(t.id)}
+                        >
+                          {t.hidden ? "◉" : "◎"}
+                        </button>
+                      )}
+                      {t.localOnly ? (
+                        <button
+                          type="button"
+                          className="pg-local-delete"
+                          title="Delete local milestone"
+                          aria-label="Delete local milestone"
+                          onClick={() => onDeleteLocalMilestone(t.id)}
+                        >
+                          ×
+                        </button>
+                      ) : t.pendingCreate ? (
+                        <button
+                          type="button"
+                          className="pg-local-delete"
+                          title="Delete draft task"
+                          aria-label="Delete draft task"
+                          onClick={() => onDeleteDraftTask(t.id)}
+                        >
+                          ×
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className={`pg-marker-toggle${t.isMarker ? " on" : ""}`}
+                          title={
+                            t.isMarker
+                              ? "Milestone marker — click to make it a normal bar"
+                              : "Mark as milestone (red star, no duration)"
+                          }
+                          aria-label="Toggle milestone marker"
+                          aria-pressed={!!t.isMarker}
+                          onClick={() => onToggleMarker(t.id)}
+                        >
+                          {t.isMarker ? "★" : "☆"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="pg-col-start">
                     <input
@@ -1418,7 +1485,7 @@ export function GanttBoard({
                       <span className="pg-bar-ghost-hint">Set {placeHover!.start}</span>
                     </div>
                   )}
-                  {t.isMarker ? (
+                  {!inHiddenFolder && t.isMarker ? (
                     (() => {
                       const md = t.start || t.due;
                       const mx = md ? markerLeft(days, md, dayWidth) : null;
@@ -1450,7 +1517,7 @@ export function GanttBoard({
                         </div>
                       );
                     })()
-                  ) : geo ? (
+                  ) : !inHiddenFolder && geo ? (
                     <div
                       className={`pg-bar${
                         isOverdue(t) ? " overdue" : ""

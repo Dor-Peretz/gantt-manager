@@ -1,5 +1,6 @@
 import type { GanttModel } from "../lib/types";
 import { isNonWorking, parseYmd, taskEnd } from "../lib/workdays";
+import { ResourceAvatar } from "./ResourceAvatar";
 import type { DayCol } from "./timeline";
 
 interface Props {
@@ -58,9 +59,7 @@ export function ResourcesPane({ model, days, dayWidth }: Props) {
         model.resources.map((r) => (
           <div className="pg-row" key={r.id}>
             <div className="pg-fixed" style={{ gap: 10, padding: "0 10px" }}>
-              <span className="pg-avatar" style={{ background: r.color }}>
-                {r.initials}
-              </span>
+              <ResourceAvatar resource={r} />
               <div className="pg-name-stack">
                 <span className="pg-name-text">{r.name}</span>
                 <span className="pg-owner">{r.team || "Assignee"}</span>

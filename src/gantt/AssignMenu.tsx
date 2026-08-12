@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Resource } from "../lib/types";
+import { ResourceAvatar } from "./ResourceAvatar";
 
 interface Props {
   resources: Resource[];
@@ -96,9 +97,7 @@ export function AssignMenu({
     }
     return (
       <span className="pg-avatar-stack" title={current.name}>
-        <span className="pg-avatar" style={{ background: current.color }} title={current.name}>
-          {current.initials}
-        </span>
+        <ResourceAvatar resource={current} />
       </span>
     );
   }
@@ -120,9 +119,7 @@ export function AssignMenu({
         aria-expanded={open}
       >
         {current ? (
-          <span className="pg-avatar" style={{ background: current.color }} title={current.name}>
-            {current.initials}
-          </span>
+          <ResourceAvatar resource={current} />
         ) : (
           <span className="pg-assign-empty">+</span>
         )}
@@ -162,9 +159,7 @@ export function AssignMenu({
                   setOpen(false);
                 }}
               >
-                <span className="pg-avatar sm" style={{ background: r.color }}>
-                  {r.initials}
-                </span>
+                <ResourceAvatar resource={r} className="sm" />
                 <span>{r.name}</span>
                 {pulledId === r.id && <span className="pg-status-meta">in Jira</span>}
               </button>

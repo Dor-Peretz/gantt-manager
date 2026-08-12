@@ -4,6 +4,8 @@ export interface Resource {
   team: string;
   color: string;
   initials: string;
+  /** Jira profile avatar URL when available */
+  avatarUrl?: string | null;
 }
 
 export interface GanttTask {
@@ -36,6 +38,11 @@ export interface GanttTask {
   jiraUpdated: string;
   /** Show as a zero-duration milestone marker (red star) instead of a bar. */
   isMarker?: boolean;
+  /**
+   * Hidden from the epic list / main timeline — collected in the bottom Hidden folder.
+   * Local preference only; never synced to Jira.
+   */
+  hidden?: boolean;
   /** Created in the app only — never Pull/Push to Jira. */
   localOnly?: boolean;
   /** Draft task created in the app — Push will create it in Jira under createEpicId. */
@@ -119,6 +126,8 @@ export interface GanttModel {
   resources: Resource[];
   milestones: Milestone[];
   pulledAt: string | null;
+  /** When true, the bottom Hidden folder is collapsed (default). */
+  hiddenFolderCollapsed?: boolean;
 }
 
 export type ThemeMode = "light" | "dark";
@@ -135,6 +144,10 @@ export interface LocalState {
   milestoneOrder: string[];
   /** issueKey -> shown as a milestone marker (red star) */
   markers: Record<string, boolean>;
+  /** issueKey -> hidden from epic list / main timeline */
+  hiddenTasks: Record<string, boolean>;
+  /** When true, the bottom Hidden folder is collapsed */
+  hiddenFolderCollapsed: boolean;
   /** Local-only milestone markers (never synced to Jira) */
   localMarkers: LocalMarker[];
   /** Draft tasks to create in Jira on Push */
@@ -234,5 +247,6 @@ export function emptyModel(jql = ""): GanttModel {
     resources: [],
     milestones: [],
     pulledAt: null,
+    hiddenFolderCollapsed: true,
   };
 }

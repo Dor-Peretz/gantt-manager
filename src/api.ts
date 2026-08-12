@@ -41,7 +41,12 @@ export async function fetchConfig(): Promise<{
   return json(await fetch("/api/config"));
 }
 
-export async function fetchHealth(): Promise<{ ok: boolean; site?: string; error?: string }> {
+export async function fetchHealth(): Promise<{
+  ok: boolean;
+  site?: string;
+  displayName?: string;
+  error?: string;
+}> {
   return json(await fetch("/api/health"));
 }
 

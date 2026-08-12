@@ -158,6 +158,26 @@ body { background: var(--page-grad); color: var(--ink); }
 }
 .app-header .health.ok { color: #15803d; border-color: #bbf7d0; background: #f0fdf4; }
 .app-header .health.bad { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.app-profile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  flex: none;
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px rgba(20, 35, 76, 0.12), var(--shadow-sm);
+  cursor: default;
+  user-select: none;
+}
+[data-theme="dark"] .app-profile {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), var(--shadow-sm);
+}
 
 .gantt-btn {
   appearance: none;
@@ -1117,9 +1137,20 @@ body.pg-resizing-y .pg-bar {
   font-weight: 800;
   flex: none;
   border: 2px solid #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 0 0 1px rgba(20, 35, 76, 0.08);
   width: 24px;
   height: 24px;
+  overflow: hidden;
+  background: var(--faint);
+}
+.pg-avatar.has-img {
+  background: transparent;
+}
+.pg-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .pg-avatar-stack {
   display: inline-flex;
@@ -1491,6 +1522,64 @@ body.pg-resizing-y .pg-bar {
 .pg-marker-toggle.on {
   opacity: 1;
   color: #ef4444;
+}
+.pg-name-actions {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 2px;
+  flex: none;
+  margin-left: auto;
+}
+.pg-hide-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.pg-row.task:hover .pg-hide-toggle { opacity: 1; }
+.pg-hide-toggle:hover { color: var(--text); }
+.pg-hide-toggle.on {
+  opacity: 1;
+  color: var(--muted);
+}
+.pg-row.task.is-hidden .pg-fixed {
+  opacity: 0.72;
+}
+.pg-row.milestone.hidden-folder .pg-fixed {
+  background: color-mix(in srgb, var(--muted) 10%, var(--surface));
+}
+.pg-hidden-folder-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+.pg-hidden-folder-label {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--muted);
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.pg-drag-handle-spacer {
+  visibility: hidden;
+  pointer-events: none;
 }
 .pg-dur-milestone {
   display: inline-flex;
@@ -1942,6 +2031,7 @@ body.pg-resizing-bar .pg-board {
 .pg-shell.pg-preview .pg-bar-handle,
 .pg-shell.pg-preview .pg-dirty-dot,
 .pg-shell.pg-preview .pg-marker-toggle,
+.pg-shell.pg-preview .pg-hide-toggle,
 .pg-shell.pg-preview .pg-local-delete {
   display: none !important;
 }

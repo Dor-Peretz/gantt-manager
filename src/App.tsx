@@ -36,8 +36,18 @@ import type {
   PushResult,
   ThemeMode,
 } from "./lib/types";
-import { emptyModel } from "./lib/types";
-import { dueFromStartDuration, setCustomNonWorkingDays } from "./lib/workdays";
+import { DEFAULT_COLORS, emptyModel } from "./lib/types";
+import {
+  dueFromStartDuration,
+  initialsFromName,
+  setCustomNonWorkingDays,
+} from "./lib/workdays";
+
+function colorForName(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return DEFAULT_COLORS[Math.abs(h) % DEFAULT_COLORS.length];
+}
 
 function assigneeAccountIdForPush(t: GanttTask): string | null | undefined {
   if (!t.assigneeDirty) return undefined;
@@ -75,6 +85,7 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
   const milestoneColors: Record<string, string> = {};
   const taskOrder: Record<string, string[]> = {};
   const markers: Record<string, boolean> = {};
+  const hiddenTasks: Record<string, boolean> = {};
   for (const m of next.milestones) {
     collapsed[m.id] = !!m.collapsed;
     milestoneColors[m.id] = m.color;
@@ -83,6 +94,7 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
       if (t.localOnly) continue;
       allocations[t.id] = t.resourceIds;
       if (t.isMarker) markers[t.id] = true;
+      if (t.hidden) hiddenTasks[t.id] = true;
     }
   }
   return {
@@ -92,6 +104,8 @@ function prefsFromModel(next: GanttModel, jqlOverride?: string): Partial<LocalSt
     taskOrder,
     milestoneOrder: next.milestones.map((m) => m.id),
     markers,
+    hiddenTasks,
+    hiddenFolderCollapsed: next.hiddenFolderCollapsed !== false,
     localMarkers: collectLocalMarkers(next),
     draftTasks: collectDraftTasks(next),
     milestoneColors,
@@ -116,6 +130,10 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
   }
   const merged: GanttModel = {
     ...fresh,
+    hiddenFolderCollapsed:
+      previous.hiddenFolderCollapsed !== undefined
+        ? previous.hiddenFolderCollapsed
+        : fresh.hiddenFolderCollapsed,
     customNonWorkingDays:
       fresh.customNonWorkingDays ?? previous.customNonWorkingDays ?? [],
     milestones: fresh.milestones.map((m) => {
@@ -127,11 +145,13 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
         tasks: m.tasks.map((t) => {
           const prevTask = prev?.tasks.find((p) => p.id === t.id);
           const isMarker = prevTask?.isMarker ?? t.isMarker;
+          const hidden = prevTask?.hidden ?? t.hidden;
           const d = dirtyById.get(t.id);
-          if (!d) return { ...t, isMarker };
+          if (!d) return { ...t, isMarker, hidden };
           return {
             ...t,
             isMarker,
+            hidden,
             start: d.scheduleDirty ? d.start : t.start,
             due: d.scheduleDirty ? d.due : t.due,
             durationDays: d.scheduleDirty ? d.durationDays : t.durationDays,
@@ -164,6 +184,21 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
     orderHint,
   );
   withLocals = injectDraftTasks(withLocals, collectDraftTasks(previous));
+  const prevHidden = new Set<string>();
+  for (const m of previous.milestones) {
+    for (const t of m.tasks) if (t.hidden) prevHidden.add(t.id);
+  }
+  if (prevHidden.size) {
+    withLocals = {
+      ...withLocals,
+      milestones: withLocals.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks.map((t) =>
+          prevHidden.has(t.id) ? { ...t, hidden: true } : t,
+        ),
+      })),
+    };
+  }
   return withLocals;
 }
 
@@ -171,9 +206,12 @@ export default function App() {
   const [model, setModel] = useState<GanttModel>(() => emptyModel());
   const [jql, setJql] = useState("");
   const [jiraBaseUrl, setJiraBaseUrl] = useState("https://sunbit.atlassian.net");
-  const [health, setHealth] = useState<{ ok: boolean; site?: string; error?: string } | null>(
-    null,
-  );
+  const [health, setHealth] = useState<{
+    ok: boolean;
+    site?: string;
+    displayName?: string;
+    error?: string;
+  } | null>(null);
   const [busy, setBusy] = useState<"pull" | "push" | null>(null);
   const [status, setStatus] = useState("Ready");
   const [hint, setHint] = useState("Enter JQL and press Pull to load Jira tasks.");
@@ -315,6 +353,19 @@ export default function App() {
           if (prefs?.draftTasks?.length) {
             restored = injectDraftTasks(restored, prefs.draftTasks);
           }
+          const savedHidden = prefs?.hiddenTasks || {};
+          restored = {
+            ...restored,
+            hiddenFolderCollapsed: prefs?.hiddenFolderCollapsed !== false,
+            milestones: restored.milestones.map((m) => ({
+              ...m,
+              tasks: m.tasks.map((t) => ({
+                ...t,
+                hidden: savedHidden[t.id] === true,
+                isMarker: t.isMarker || prefs?.markers?.[t.id] === true,
+              })),
+            })),
+          };
           setModel(restored);
           if (cache.scroll) setScroll(cache.scroll);
           const count = restored.milestones.reduce((n, m) => n + m.tasks.length, 0);
@@ -865,6 +916,34 @@ export default function App() {
     setStatus(nowMarker ? "Marked as milestone" : "Milestone mark removed");
   }
 
+  function onToggleHidden(taskId: string) {
+    let nowHidden = false;
+    updateModel((prev) => {
+      const milestones = prev.milestones.map((m) => ({
+        ...m,
+        tasks: m.tasks.map((t) => {
+          if (t.id !== taskId || t.localOnly) return t;
+          nowHidden = !t.hidden;
+          return { ...t, hidden: nowHidden };
+        }),
+      }));
+      return {
+        ...prev,
+        milestones,
+        // Expand the folder when hiding so the task is easy to find again.
+        hiddenFolderCollapsed: nowHidden ? false : prev.hiddenFolderCollapsed,
+      };
+    });
+    setStatus(nowHidden ? "Task hidden" : "Task shown");
+  }
+
+  function onToggleHiddenFolder() {
+    updateModel((prev) => ({
+      ...prev,
+      hiddenFolderCollapsed: !(prev.hiddenFolderCollapsed !== false),
+    }));
+  }
+
   function onMilestoneColorChange(milestoneId: string, color: string) {
     updateModel((prev) => ({
       ...prev,
@@ -975,6 +1054,16 @@ export default function App() {
             Preview
           </button>
         </div>
+        {health?.ok && health.displayName && (
+          <span
+            className="app-profile"
+            style={{ background: colorForName(health.displayName) }}
+            title={health.displayName}
+            aria-label={`Signed in as ${health.displayName}`}
+          >
+            {initialsFromName(health.displayName)}
+          </span>
+        )}
       </header>
 
       <div className="pg-toolbar">
@@ -1078,6 +1167,8 @@ export default function App() {
         onReorderMilestone={onReorderMilestone}
         onReorderTask={onReorderTask}
         onToggleMarker={onToggleMarker}
+        onToggleHidden={onToggleHidden}
+        onToggleHiddenFolder={onToggleHiddenFolder}
         onDeleteLocalMilestone={onDeleteLocalMilestone}
         onDeleteDraftTask={onDeleteDraftTask}
         onLayoutChange={(patch) => updateModel((prev) => ({ ...prev, ...patch }))}
