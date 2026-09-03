@@ -1,8 +1,11 @@
 import type {
   GanttModel,
+  HistoryFieldMap,
+  IssueChangelog,
   LocalState,
   PushItem,
   PushResult,
+  QaItem,
   StatusTransition,
 } from "./lib/types";
 
@@ -41,7 +44,12 @@ export async function fetchConfig(): Promise<{
   return json(await fetch("/api/config"));
 }
 
-export async function fetchHealth(): Promise<{ ok: boolean; site?: string; error?: string }> {
+export async function fetchHealth(): Promise<{
+  ok: boolean;
+  site?: string;
+  displayName?: string;
+  error?: string;
+}> {
   return json(await fetch("/api/health"));
 }
 
@@ -94,4 +102,43 @@ export async function fetchTransitions(
   issueKey: string,
 ): Promise<{ key: string; transitions: StatusTransition[] }> {
   return json(await fetch(`/api/transitions/${encodeURIComponent(issueKey)}`));
+}
+
+export async function fetchChangelogs(
+  keys: string[],
+): Promise<{ changelogs: IssueChangelog[]; fieldMap: HistoryFieldMap }> {
+  return json(
+    await fetch("/api/changelogs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys }),
+    }),
+  );
+}
+
+/** QA items live on their linked Jira issues as an issue property. */
+export async function saveQaItem(
+  item: QaItem,
+  previousLinkedKeys: string[] = [],
+): Promise<void> {
+  await json(
+    await fetch("/api/qa", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item, previousLinkedKeys }),
+    }),
+  );
+}
+
+export async function deleteQaItem(
+  itemId: string,
+  linkedIssueKeys: string[],
+): Promise<void> {
+  await json(
+    await fetch("/api/qa", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ itemId, linkedIssueKeys }),
+    }),
+  );
 }

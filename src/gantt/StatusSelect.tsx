@@ -37,6 +37,7 @@ interface Props {
     transitionId: string | null;
     timeSpent?: string | null;
   }) => void;
+  disabled?: boolean;
 }
 
 interface MenuPos {
@@ -58,6 +59,7 @@ export function StatusSelect({
   durationDays = 1,
   timeSpent,
   onChange,
+  disabled = false,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<MenuPos | null>(null);
@@ -205,9 +207,13 @@ export function StatusSelect({
       <button
         ref={btnRef}
         type="button"
-        className={`pg-status-pill editable ${statusClass(status || "")}${transitionId ? " dirty" : ""}`}
+        className={`pg-status-pill${disabled ? "" : " editable"} ${statusClass(status || "")}${transitionId ? " dirty" : ""}`}
         title={title}
-        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) return;
+          setOpen((v) => !v);
+        }}
         aria-expanded={open}
       >
         {status || "—"}

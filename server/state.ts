@@ -2,33 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LocalState } from "../src/lib/types.ts";
+import { normalizeState } from "../src/domain/stateDefaults.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const PREFS_PATH = path.resolve(ROOT, "preferences.json");
 const LEGACY_PATH = path.resolve(ROOT, "gantt-state.json");
-
-const DEFAULT_STATE: LocalState = {
-  resources: [],
-  allocations: {},
-  collapsed: {},
-  taskOrder: {},
-  milestoneOrder: [],
-  markers: {},
-  localMarkers: [],
-  draftTasks: [],
-  projectStart: new Date().toISOString().slice(0, 10),
-  showHolidays: true,
-  showDeps: true,
-  customNonWorkingDays: [],
-  dayWidthPx: 28,
-  leftPanelWidth: 680,
-  resourcesDockHeight: 220,
-  resourcesDockCollapsed: false,
-  jql: process.env.JIRA_JQL || "",
-  milestoneColors: {},
-  theme: "light",
-};
 
 function migrateLegacyIfNeeded(): void {
   if (fs.existsSync(PREFS_PATH) || !fs.existsSync(LEGACY_PATH)) return;
@@ -44,30 +23,10 @@ function migrateLegacyIfNeeded(): void {
   }
 }
 
+/** Shared defaults with the UI, plus the .env fallback for the initial JQL. */
 function normalize(raw: Partial<LocalState> | null | undefined): LocalState {
-  return {
-    ...DEFAULT_STATE,
-    ...(raw || {}),
-    resources: raw?.resources ?? [],
-    allocations: raw?.allocations ?? {},
-    collapsed: raw?.collapsed ?? {},
-    taskOrder: raw?.taskOrder ?? {},
-    milestoneOrder: raw?.milestoneOrder ?? [],
-    markers: raw?.markers ?? {},
-    localMarkers: raw?.localMarkers ?? [],
-    draftTasks: raw?.draftTasks ?? [],
-    milestoneColors: raw?.milestoneColors ?? {},
-    jql: raw?.jql ?? process.env.JIRA_JQL ?? "",
-    projectStart: raw?.projectStart || DEFAULT_STATE.projectStart,
-    showHolidays: raw?.showHolidays !== false,
-    showDeps: raw?.showDeps !== false,
-    customNonWorkingDays: raw?.customNonWorkingDays ?? [],
-    dayWidthPx: raw?.dayWidthPx || 28,
-    leftPanelWidth: raw?.leftPanelWidth || 680,
-    resourcesDockHeight: raw?.resourcesDockHeight || 220,
-    resourcesDockCollapsed: raw?.resourcesDockCollapsed === true,
-    theme: raw?.theme === "dark" ? "dark" : "light",
-  };
+  const state = normalizeState(raw);
+  return { ...state, jql: state.jql || process.env.JIRA_JQL || "" };
 }
 
 export function prefsPath(): string {

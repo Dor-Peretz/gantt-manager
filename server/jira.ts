@@ -1,19 +1,36 @@
 import type {
+  ChangelogHistory,
   GanttModel,
   GanttTask,
+  HistoryFieldMap,
+  IssueChangelog,
   Milestone,
   PushItem,
   PushResult,
+  QaItem,
   Resource,
 } from "../src/lib/types.ts";
-import { DEFAULT_COLORS, MILESTONE_COLORS } from "../src/lib/types.ts";
+import {
+  DEFAULT_COLORS,
+  MILESTONE_COLORS,
+  QA_PROPERTY_KEY,
+  normalizeColumnWidths,
+} from "../src/lib/types.ts";
 import {
   dueFromStartDuration,
-  durationFromStartDue,
   initialsFromName,
   setCustomNonWorkingDays,
-  startFromDueDuration,
 } from "../src/lib/workdays.ts";
+import { parseStoryPoints, scheduleFromFields } from "../src/lib/jiraSchedule.ts";
+import { applySavedBoardOrder } from "../src/lib/boardOrder.ts";
+import {
+  dedupeQaItems,
+  filterQaItemsForBoard,
+  injectQaItems,
+  parseQaProperty,
+  refreshQaAssignees,
+  type QaPropertyPayload,
+} from "../src/lib/qaItems.ts";
 import { mergeState, readState } from "./state.ts";
 
 function hash(s: string): number {
@@ -54,6 +71,7 @@ interface FieldMap {
 interface JiraIssue {
   key: string;
   fields: Record<string, unknown>;
+  properties?: Record<string, { value?: unknown }>;
 }
 
 function requireEnv(name: string): string {
@@ -151,64 +169,6 @@ function ownerLabel(fields: Record<string, unknown>, fieldMap: FieldMap): string
   return parts.join(" · ") || "—";
 }
 
-function parseStoryPoints(raw: unknown): number | null {
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-  if (typeof raw === "string" && raw.trim() !== "") {
-    const n = Number(raw);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
-}
-
-/**
- * Resolve start/due/duration from Jira dates + Story Points.
- * Story Points are the app's Dur estimate whenever present (1 SP ≈ 1 working day).
- */
-function scheduleFromFields(
-  start: string | null,
-  due: string | null,
-  sp: number | null,
-  holidaysOn: boolean,
-): { start: string | null; due: string | null; durationDays: number; estDays: number | null } {
-  // Jira is source of truth: missing / non-positive SP means no estimate in the app.
-  const estDays = sp != null && Number.isFinite(sp) && sp > 0 ? sp : null;
-  const estDur = estDays != null ? Math.max(1, Math.round(estDays)) : null;
-
-  // Prefer Story Points as Dur — keep Start, derive Due to match the estimate.
-  if (estDur != null) {
-    if (start) {
-      return {
-        start,
-        due: dueFromStartDuration(start, estDur, holidaysOn),
-        durationDays: estDur,
-        estDays,
-      };
-    }
-    if (due) {
-      return {
-        start: startFromDueDuration(due, estDur, holidaysOn),
-        due,
-        durationDays: estDur,
-        estDays,
-      };
-    }
-    return { start: null, due: null, durationDays: estDur, estDays };
-  }
-
-  // No Story Points — fall back to date span / defaults.
-  if (start && due) {
-    return {
-      start,
-      due,
-      durationDays: durationFromStartDue(start, due, holidaysOn),
-      estDays: null,
-    };
-  }
-  if (start) return { start, due, durationDays: 1, estDays: null };
-  if (due) return { start: null, due, durationDays: 1, estDays: null };
-  return { start: null, due: null, durationDays: 1, estDays: null };
-}
-
 function taskFromIssue(
   issue: JiraIssue,
   fieldMap: FieldMap,
@@ -249,7 +209,11 @@ function taskFromIssue(
   };
 }
 
-async function searchAll(jql: string, fields: string[]): Promise<JiraIssue[]> {
+async function searchAll(
+  jql: string,
+  fields: string[],
+  properties: string[] = [],
+): Promise<JiraIssue[]> {
   const issues: JiraIssue[] = [];
   let nextPageToken: string | undefined;
   // Prefer new /search/jql; fall back to classic /search
@@ -259,6 +223,7 @@ async function searchAll(jql: string, fields: string[]): Promise<JiraIssue[]> {
       maxResults: 100,
       fields,
     };
+    if (properties.length) body.properties = properties;
     if (nextPageToken) body.nextPageToken = nextPageToken;
 
     let res = await jiraFetch("/rest/api/3/search/jql", {
@@ -268,12 +233,13 @@ async function searchAll(jql: string, fields: string[]): Promise<JiraIssue[]> {
 
     if (res.status === 404 || res.status === 410) {
       // Classic search with startAt
-      const classicBody = {
+      const classicBody: Record<string, unknown> = {
         jql,
         startAt: issues.length,
         maxResults: 100,
         fields,
       };
+      if (properties.length) classicBody.properties = properties;
       res = await jiraFetch("/rest/api/3/search", {
         method: "POST",
         body: JSON.stringify(classicBody),
@@ -348,7 +314,41 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     fieldMap.epicLink,
   ];
 
-  const issues = await searchAll(jql, fields);
+  const issues = await searchAll(jql, fields, [QA_PROPERTY_KEY]);
+
+  // QA items (integration tests / E2E flows) ride along as an issue property on
+  // each linked ticket. Search only returns properties it was asked for, so any
+  // issue that came back without one gets a direct property read.
+  const qaCollected: QaItem[] = [];
+  const needsPropertyFetch: string[] = [];
+  for (const issue of issues) {
+    const prop = issue.properties?.[QA_PROPERTY_KEY]?.value;
+    if (prop) {
+      qaCollected.push(...parseQaProperty(prop));
+    } else {
+      needsPropertyFetch.push(issue.key);
+    }
+  }
+  if (needsPropertyFetch.length) {
+    for (let i = 0; i < needsPropertyFetch.length; i += 20) {
+      const chunk = needsPropertyFetch.slice(i, i + 20);
+      await Promise.all(
+        chunk.map(async (key) => {
+          try {
+            const res = await jiraFetch(
+              `/rest/api/3/issue/${encodeURIComponent(key)}/properties/${encodeURIComponent(QA_PROPERTY_KEY)}`,
+            );
+            if (!res.ok) return;
+            const data = (await res.json()) as { value?: unknown };
+            qaCollected.push(...parseQaProperty(data.value));
+          } catch {
+            /* non-fatal */
+          }
+        }),
+      );
+    }
+  }
+  const qaItems = dedupeQaItems(qaCollected);
 
   // Group stories under parent epic. Childless epics use their own start/due/estimate.
   const tasksByEpic = new Map<string, GanttTask[]>();
@@ -367,6 +367,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   function resourceFromAssignee(assignee: {
     accountId?: string;
     displayName?: string;
+    avatarUrls?: Record<string, string>;
   } | null): string | null {
     if (!assignee?.accountId) return null;
     const id = `jira:${assignee.accountId}`;
@@ -374,12 +375,16 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       const name = assignee.displayName || assignee.accountId;
       const color = prevColor.get(id) || colorForAssignee(assignee.accountId, usedColors);
       if (prevColor.has(id)) usedColors.add(color);
+      const urls = assignee.avatarUrls || {};
+      const avatarUrl =
+        urls["48x48"] || urls["32x32"] || urls["24x24"] || urls["16x16"] || null;
       resourceById.set(id, {
         id,
         name,
         team: "Jira assignee",
         color,
         initials: initialsFromName(name),
+        avatarUrl,
       });
     }
     return id;
@@ -456,7 +461,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       id: epicKey,
       title: summary,
       color: milestoneColor(epicKey, summary, local.milestoneColors),
-      collapsed: local.collapsed[epicKey] ?? false,
+      collapsed: local.collapsed[epicKey] ?? true,
       tasks: scheduleTasks,
     });
   }
@@ -464,38 +469,14 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   // Prefer human titles (M0/M1/M2…) over raw keys
   milestones.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
 
-  // Apply saved manual epic order; unknown/new epics keep title order at the end.
-  const msOrder = local.milestoneOrder || [];
-  if (msOrder.length) {
-    const msPos = new Map(msOrder.map((id, i) => [id, i]));
-    milestones.sort((a, b) => {
-      const pa = msPos.has(a.id) ? (msPos.get(a.id) as number) : Number.MAX_SAFE_INTEGER;
-      const pb = msPos.has(b.id) ? (msPos.get(b.id) as number) : Number.MAX_SAFE_INTEGER;
-      if (pa !== pb) return pa - pb;
-      return a.title.localeCompare(b.title, undefined, { numeric: true });
-    });
-  }
-
-  // Restore saved milestone-marker flags.
+  // Restore saved milestone-marker + hidden flags.
   const savedMarkers = local.markers || {};
+  const savedHidden = local.hiddenTasks || {};
   for (const m of milestones) {
-    for (const t of m.tasks) t.isMarker = savedMarkers[t.id] === true;
-  }
-
-  // Apply saved manual task order; unknown/new tasks keep Jira order at the end.
-  const savedOrder = local.taskOrder || {};
-  for (const m of milestones) {
-    const ord = savedOrder[m.id];
-    if (!ord || !ord.length) continue;
-    const pos = new Map(ord.map((id, i) => [id, i]));
-    m.tasks = m.tasks
-      .map((t, i) => ({ t, i }))
-      .sort((a, b) => {
-        const pa = pos.has(a.t.id) ? (pos.get(a.t.id) as number) : Number.MAX_SAFE_INTEGER;
-        const pb = pos.has(b.t.id) ? (pos.get(b.t.id) as number) : Number.MAX_SAFE_INTEGER;
-        return pa - pb || a.i - b.i;
-      })
-      .map((x) => x.t);
+    for (const t of m.tasks) {
+      t.isMarker = savedMarkers[t.id] === true;
+      t.hidden = savedHidden[t.id] === true;
+    }
   }
 
   const projectStart =
@@ -515,22 +496,34 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   // Persist Jira-derived roster (colors) so they stay stable across pulls
   mergeState({ resources, allocations, jql });
 
-  return {
+  let model: GanttModel = {
     title: "Jira Gantt",
     projectStart,
     dayWidthPx: local.dayWidthPx || 28,
     leftPanelWidth: local.leftPanelWidth || 680,
+    columnWidths: normalizeColumnWidths(local.columnWidths),
     resourcesDockHeight: local.resourcesDockHeight || 220,
     resourcesDockCollapsed: local.resourcesDockCollapsed === true,
     hoursPerDay: 8,
     showHolidays: local.showHolidays !== false,
-    showDeps: local.showDeps !== false,
+    showDeps: local.showDeps === true,
     customNonWorkingDays: local.customNonWorkingDays ?? [],
     jql,
     resources,
     milestones,
     pulledAt: new Date().toISOString(),
+    hiddenFolderCollapsed: local.hiddenFolderCollapsed !== false,
   };
+  model = applySavedBoardOrder(model, local.milestoneOrder || [], local.taskOrder || {});
+
+  // QA rows only make sense when their linked tickets are on this board.
+  const visibleQa = filterQaItemsForBoard(model, qaItems);
+  if (visibleQa.length) {
+    model = injectQaItems(model, visibleQa, local.milestoneOrder);
+    model = refreshQaAssignees(model);
+  }
+
+  return model;
 }
 
 export interface JiraTransition {
@@ -561,9 +554,225 @@ export async function getTransitions(issueKey: string): Promise<JiraTransition[]
   }));
 }
 
+function compactChangelogHistory(raw: {
+  created?: string;
+  items?: Array<{
+    field?: string;
+    fieldId?: string;
+    from?: string | null;
+    fromString?: string | null;
+    to?: string | null;
+    toString?: string | null;
+  }>;
+}): ChangelogHistory {
+  return {
+    created: String(raw.created || ""),
+    items: (raw.items || []).map((item) => ({
+      fieldId: String(item.fieldId || ""),
+      field: String(item.field || ""),
+      from: item.from ?? null,
+      fromString: item.fromString ?? null,
+      to: item.to ?? null,
+      toString: item.toString ?? null,
+    })),
+  };
+}
+
+async function fetchIssueChangelog(key: string): Promise<IssueChangelog> {
+  const metaRes = await jiraFetch(
+    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=created`,
+  );
+  if (!metaRes.ok) {
+    const text = await metaRes.text();
+    throw new Error(`issue meta failed for ${key} (${metaRes.status}): ${text.slice(0, 200)}`);
+  }
+  const meta = (await metaRes.json()) as { fields?: { created?: string } };
+  const created = String(meta.fields?.created || "");
+
+  const histories: ChangelogHistory[] = [];
+  let startAt = 0;
+  for (let page = 0; page < 50; page++) {
+    const res = await jiraFetch(
+      `/rest/api/3/issue/${encodeURIComponent(key)}/changelog?startAt=${startAt}&maxResults=100`,
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`changelog failed for ${key} (${res.status}): ${text.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as {
+      values?: Array<Parameters<typeof compactChangelogHistory>[0]>;
+      histories?: Array<Parameters<typeof compactChangelogHistory>[0]>;
+      total?: number;
+      maxResults?: number;
+      startAt?: number;
+    };
+    const batch = data.values || data.histories || [];
+    for (const h of batch) histories.push(compactChangelogHistory(h));
+    const maxResults = data.maxResults ?? batch.length;
+    const total = data.total ?? histories.length;
+    startAt += maxResults;
+    if (!batch.length || startAt >= total) break;
+  }
+
+  return { key, created, histories };
+}
+
+/** Ticket history for the board's "as of date" / overlay views. */
+export async function fetchChangelogs(keys: string[]): Promise<{
+  changelogs: IssueChangelog[];
+  fieldMap: HistoryFieldMap;
+}> {
+  const discovered = await discoverFields();
+  const fieldMap: HistoryFieldMap = {
+    startDate: discovered.startDate,
+    storyPoints: discovered.storyPoints,
+  };
+  const unique = [...new Set(keys.filter(Boolean))];
+  const changelogs: IssueChangelog[] = [];
+  for (const key of unique) {
+    try {
+      changelogs.push(await fetchIssueChangelog(key));
+    } catch (err) {
+      console.warn(`gantt fetchChangelog skip ${key}`, err);
+    }
+  }
+  return { changelogs, fieldMap };
+}
+
+async function getQaItemsOnHost(issueKey: string): Promise<QaItem[]> {
+  const res = await jiraFetch(
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(QA_PROPERTY_KEY)}`,
+  );
+  if (res.status === 404) return [];
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `read QA property on ${issueKey} failed (${res.status}): ${text.slice(0, 200)}`,
+    );
+  }
+  const data = (await res.json()) as { value?: QaPropertyPayload };
+  return Array.isArray(data.value?.items) ? data.value.items : [];
+}
+
+async function putQaItemsOnHost(issueKey: string, items: QaItem[]): Promise<void> {
+  const propertyPath = `/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(QA_PROPERTY_KEY)}`;
+  if (!items.length) {
+    const del = await jiraFetch(propertyPath, { method: "DELETE" });
+    if (!del.ok && del.status !== 404) {
+      const text = await del.text();
+      throw new Error(
+        `delete QA property on ${issueKey} failed (${del.status}): ${text.slice(0, 200)}`,
+      );
+    }
+    return;
+  }
+  const payload: QaPropertyPayload = { v: 1, items };
+  const res = await jiraFetch(propertyPath, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `write QA property on ${issueKey} failed (${res.status}): ${text.slice(0, 200)}`,
+    );
+  }
+}
+
+/** Upsert a QA item on every linked host; remove it from hosts no longer linked. */
+export async function saveQaItem(
+  item: QaItem,
+  previousLinkedKeys: string[] = [],
+): Promise<void> {
+  const nextKeys = new Set(item.linkedIssueKeys);
+  const touched = new Set([...nextKeys, ...previousLinkedKeys]);
+  for (const key of touched) {
+    const current = await getQaItemsOnHost(key);
+    const without = current.filter((i) => i.id !== item.id);
+    await putQaItemsOnHost(key, nextKeys.has(key) ? [...without, item] : without);
+  }
+}
+
+/** Remove a QA item from every host that stored it. */
+export async function deleteQaItem(
+  itemId: string,
+  linkedIssueKeys: string[],
+): Promise<void> {
+  for (const key of [...new Set(linkedIssueKeys)].filter(Boolean)) {
+    const current = await getQaItemsOnHost(key);
+    await putQaItemsOnHost(
+      key,
+      current.filter((i) => i.id !== itemId),
+    );
+  }
+}
+
 function projectKeyFromIssueKey(issueKey: string): string {
   const i = issueKey.lastIndexOf("-");
   return i > 0 ? issueKey.slice(0, i) : issueKey;
+}
+
+/** Plain text → Atlassian Document Format for the Description field. */
+function adfParagraph(text: string): Record<string, unknown> {
+  const body = text.trim() || "Created from Gantt Manager.";
+  return {
+    type: "doc",
+    version: 1,
+    content: [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: body }],
+      },
+    ],
+  };
+}
+
+/**
+ * Standard story-level types for this project (hierarchyLevel 0, not subtasks).
+ * Prefer Story / Eng Story / Task when present; never invent types Jira rejects.
+ */
+async function creatableIssueTypeNames(projectKey: string): Promise<string[]> {
+  const preferred = ["Story", "Eng Story", "Task"];
+  try {
+    const res = await jiraFetch(
+      `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
+    );
+    if (!res.ok) throw new Error(`createmeta ${res.status}`);
+    const data = (await res.json()) as {
+      issueTypes?: Array<{ name?: string; subtask?: boolean; hierarchyLevel?: number }>;
+    };
+    const available = (data.issueTypes || [])
+      .filter((t) => t.name && !t.subtask && (t.hierarchyLevel ?? 0) === 0)
+      .map((t) => t.name!);
+    const ranked = [
+      ...preferred.filter((n) => available.includes(n)),
+      ...available.filter((n) => !preferred.includes(n)),
+    ];
+    if (ranked.length) return ranked;
+  } catch {
+    // fall through
+  }
+  return preferred;
+}
+
+/** Team id string from the parent epic when the project requires Team on create. */
+async function teamIdFromEpic(
+  epicKey: string,
+  teamField: string,
+): Promise<string | null> {
+  try {
+    const res = await jiraFetch(
+      `/rest/api/3/issue/${encodeURIComponent(epicKey)}?fields=${encodeURIComponent(teamField)}`,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { fields?: Record<string, unknown> };
+    const team = data.fields?.[teamField] as { id?: string } | string | null | undefined;
+    if (typeof team === "string" && team) return team;
+    if (team && typeof team === "object" && typeof team.id === "string") return team.id;
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 function worklogStartedIso(startYmd: string | null | undefined): string {
@@ -655,40 +864,47 @@ async function createIssueInJira(
 ): Promise<PushResult> {
   const create = item.create!;
   const projectKey = projectKeyFromIssueKey(create.epicKey);
-  const issueTypes = ["Story", "Task"];
+  const issueTypes = await creatableIssueTypeNames(projectKey);
+  const teamId = await teamIdFromEpic(create.epicKey, fieldMap.team);
   let lastError = "create failed";
+
+  const sp =
+    item.storyPoints != null && Number.isFinite(item.storyPoints) && item.storyPoints > 0
+      ? Math.max(1, Math.round(item.storyPoints))
+      : null;
+
+  // SBT (and similar schemes) require Description + Priority; Team is often
+  // enforced by a validator even when createmeta marks it optional.
+  const baseFields: Record<string, unknown> = {
+    project: { key: projectKey },
+    summary: create.summary,
+    description: adfParagraph(create.summary),
+    priority: { name: "Medium" },
+    [fieldMap.startDate]: item.start,
+    duedate: item.due,
+    ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
+    ...(teamId ? { [fieldMap.team]: teamId } : {}),
+  };
+  if (item.assigneeAccountId) {
+    baseFields.assignee = { accountId: item.assigneeAccountId };
+  }
 
   for (const typeName of issueTypes) {
     // Prefer parent (next-gen / hierarchy); fall back to Epic Link (classic).
-    const sp =
-      item.storyPoints != null && Number.isFinite(item.storyPoints) && item.storyPoints > 0
-        ? Math.max(1, Math.round(item.storyPoints))
-        : null;
     const attempts: Array<Record<string, unknown>> = [
       {
-        project: { key: projectKey },
-        summary: create.summary,
+        ...baseFields,
         issuetype: { name: typeName },
         parent: { key: create.epicKey },
-        [fieldMap.startDate]: item.start,
-        duedate: item.due,
-        ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
       },
       {
-        project: { key: projectKey },
-        summary: create.summary,
+        ...baseFields,
         issuetype: { name: typeName },
         [fieldMap.epicLink]: create.epicKey,
-        [fieldMap.startDate]: item.start,
-        duedate: item.due,
-        ...(sp != null ? { [fieldMap.storyPoints]: sp } : {}),
       },
     ];
 
     for (const fields of attempts) {
-      if (item.assigneeAccountId) {
-        fields.assignee = { accountId: item.assigneeAccountId };
-      }
       const res = await jiraFetch("/rest/api/3/issue", {
         method: "POST",
         body: JSON.stringify({ fields }),
@@ -721,8 +937,13 @@ async function createIssueInJira(
           message: `Created ${createdKey} under ${create.epicKey}`,
         };
       }
-      lastError = `create failed (${res.status}): ${(await res.text()).slice(0, 400)}`;
-      // Try next shape / issue type
+      const body = (await res.text()).slice(0, 400);
+      const msg = `create failed (${res.status}): ${body}`;
+      // Keep the first meaningful failure (e.g. Description/Team) rather than
+      // overwriting with a later "invalid issue type" from a fallback type.
+      if (lastError === "create failed" || !/issuetype/i.test(body)) {
+        lastError = msg;
+      }
     }
   }
 
@@ -841,7 +1062,12 @@ export async function pushToJira(items: PushItem[]): Promise<PushResult[]> {
   return results;
 }
 
-export async function healthCheck(): Promise<{ ok: boolean; site?: string; error?: string }> {
+export async function healthCheck(): Promise<{
+  ok: boolean;
+  site?: string;
+  displayName?: string;
+  error?: string;
+}> {
   try {
     requireEnv("JIRA_BASE_URL");
     requireEnv("JIRA_EMAIL");
@@ -849,7 +1075,8 @@ export async function healthCheck(): Promise<{ ok: boolean; site?: string; error
     const res = await jiraFetch("/rest/api/3/myself");
     if (!res.ok) return { ok: false, error: `auth failed (${res.status})` };
     const me = (await res.json()) as { displayName?: string };
-    return { ok: true, site: `${baseUrl()} as ${me.displayName || "user"}` };
+    const displayName = me.displayName || "user";
+    return { ok: true, displayName, site: `${baseUrl()} as ${displayName}` };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

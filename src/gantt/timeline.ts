@@ -40,17 +40,21 @@ export interface RowLayout {
   task?: GanttTask;
   rowIndex: number;
   y: number;
+  /** Synthetic bottom folder that collects hidden tasks. */
+  isHiddenFolder?: boolean;
 }
 
 const DOW = ["S", "M", "T", "W", "T", "F", "S"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export const ROW_H = 40;
 export const HEAD_H = 64;
+/** Reserved id for the synthetic Hidden folder row. */
+export const HIDDEN_FOLDER_ID = "__hidden__";
 
 export function visibleTasks(milestones: Milestone[]): GanttTask[] {
   const out: GanttTask[] = [];
   for (const m of milestones) {
-    if (!m.collapsed) out.push(...m.tasks);
+    if (!m.collapsed) out.push(...m.tasks.filter((t) => !t.hidden));
   }
   return out;
 }
@@ -60,19 +64,57 @@ export function isEpicSelfTask(milestoneId: string, task: GanttTask): boolean {
   return task.id === milestoneId;
 }
 
-export function buildRows(milestones: Milestone[]): RowLayout[] {
+export function buildRows(
+  milestones: Milestone[],
+  hiddenFolderCollapsed = true,
+): RowLayout[] {
   const rows: RowLayout[] = [];
+  const hidden: Array<{ milestone: Milestone; task: GanttTask }> = [];
   let i = 0;
   for (const m of milestones) {
     rows.push({ kind: "milestone", milestone: m, rowIndex: i, y: HEAD_H + i * ROW_H });
     i++;
     // Local milestones are a single top-level star row — never expand children.
     if (m.localOnly) continue;
-    if (!m.collapsed) {
-      for (const t of m.tasks) {
-        // Epic self-schedule is shown on the milestone row, not nested under it.
-        if (isEpicSelfTask(m.id, t)) continue;
-        rows.push({ kind: "task", milestone: m, task: t, rowIndex: i, y: HEAD_H + i * ROW_H });
+    for (const t of m.tasks) {
+      if (isEpicSelfTask(m.id, t)) continue;
+      if (t.hidden) {
+        hidden.push({ milestone: m, task: t });
+        continue;
+      }
+      if (m.collapsed) continue;
+      rows.push({ kind: "task", milestone: m, task: t, rowIndex: i, y: HEAD_H + i * ROW_H });
+      i++;
+    }
+  }
+
+  if (hidden.length) {
+    const folder: Milestone = {
+      id: HIDDEN_FOLDER_ID,
+      title: `Hidden (${hidden.length})`,
+      color: "#94A3B8",
+      collapsed: hiddenFolderCollapsed,
+      tasks: hidden.map((h) => h.task),
+      localOnly: true,
+    };
+    rows.push({
+      kind: "milestone",
+      milestone: folder,
+      rowIndex: i,
+      y: HEAD_H + i * ROW_H,
+      isHiddenFolder: true,
+    });
+    i++;
+    if (!hiddenFolderCollapsed) {
+      for (const { milestone, task } of hidden) {
+        rows.push({
+          kind: "task",
+          milestone,
+          task,
+          rowIndex: i,
+          y: HEAD_H + i * ROW_H,
+          isHiddenFolder: true,
+        });
         i++;
       }
     }
@@ -157,7 +199,7 @@ export function milestoneSpan(
   let min: Date | null = null;
   let max: Date | null = null;
   for (const t of milestone.tasks) {
-    if (!t.start) continue;
+    if (!t.start || t.hidden) continue;
     const s = parseYmd(t.start);
     const e = taskEnd(t.start, t.durationDays, holidaysOn);
     if (!min || s < min) min = s;
