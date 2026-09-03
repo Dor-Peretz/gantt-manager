@@ -1,11 +1,20 @@
 {
   "jql": "project = SBT AND parent = SBT-61018 ORDER BY rank ASC",
+  "savedJqls": [],
+  "activeSavedJqlId": null,
   "projectStart": "2026-07-21",
   "showHolidays": true,
-  "showDeps": true,
+  "showDeps": false,
   "customNonWorkingDays": [],
   "dayWidthPx": 28,
   "leftPanelWidth": 680,
+  "columnWidths": {
+    "name": 238,
+    "start": 108,
+    "dur": 78,
+    "status": 108,
+    "res": 100
+  },
   "resourcesDockHeight": 220,
   "theme": "light",
   "collapsed": {},
@@ -16,6 +25,7 @@
   "hiddenFolderCollapsed": true,
   "localMarkers": [],
   "draftTasks": [],
+  "pendingQaDeletes": [],
   "milestoneColors": {},
   "resources": [],
   "allocations": {}

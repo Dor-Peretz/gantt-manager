@@ -3,9 +3,17 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import dotenv from "dotenv";
 import { mergeCache, readCache, writeCache, type GanttCache } from "./cache.ts";
-import { getTransitions, healthCheck, pullFromJira, pushToJira } from "./jira.ts";
+import {
+  deleteQaItem,
+  fetchChangelogs,
+  getTransitions,
+  healthCheck,
+  pullFromJira,
+  pushToJira,
+  saveQaItem,
+} from "./jira.ts";
 import { mergeState, readState, writeState } from "./state.ts";
-import type { LocalState, PushItem } from "../src/lib/types.ts";
+import type { LocalState, PushItem, QaItem } from "../src/lib/types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
@@ -130,6 +138,52 @@ app.get("/api/transitions/:key", async (req, res) => {
     res.json({ key, transitions });
   } catch (err) {
     console.error("transitions failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/changelogs", async (req, res) => {
+  try {
+    const keys = (req.body?.keys || []) as string[];
+    if (!Array.isArray(keys) || !keys.length) {
+      res.status(400).json({ error: "body.keys required" });
+      return;
+    }
+    res.json(await fetchChangelogs(keys));
+  } catch (err) {
+    console.error("changelogs failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.put("/api/qa", async (req, res) => {
+  try {
+    const item = req.body?.item as QaItem | undefined;
+    if (!item?.id || !Array.isArray(item.linkedIssueKeys)) {
+      res.status(400).json({ error: "body.item with linkedIssueKeys required" });
+      return;
+    }
+    const previousLinkedKeys = (req.body?.previousLinkedKeys || []) as string[];
+    await saveQaItem(item, previousLinkedKeys);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("qa save failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.delete("/api/qa", async (req, res) => {
+  try {
+    const itemId = String(req.body?.itemId || "").trim();
+    const linkedIssueKeys = (req.body?.linkedIssueKeys || []) as string[];
+    if (!itemId) {
+      res.status(400).json({ error: "body.itemId required" });
+      return;
+    }
+    await deleteQaItem(itemId, linkedIssueKeys);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("qa delete failed", err);
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

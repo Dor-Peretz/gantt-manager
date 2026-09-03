@@ -5,10 +5,17 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import type { ScrollState } from "../api";
-import type { GanttModel, GanttTask } from "../lib/types";
-import { UNASSIGNED_COLOR } from "../lib/types";
+import type { GanttModel, GanttTask, HistoricalSchedule, HistoryViewMode } from "../lib/types";
+import { isLocalMilestoneRow, isQaMilestone, qaKindIcon, qaKindLabel } from "../lib/qaItems";
+import { historicalScheduleDiffers } from "../lib/jiraHistory";
+import {
+  DEFAULT_COLUMN_WIDTHS,
+  UNASSIGNED_COLOR,
+  normalizeColumnWidths,
+} from "../lib/types";
 import {
   dueFromStartDuration,
   firstWorkingDay,
@@ -16,8 +23,10 @@ import {
   parseYmd,
   todayLocal,
 } from "../lib/workdays";
+import { AddTimelineMenu, type DeletableTimelineItem } from "./AddTimelineMenu";
 import { AssignMenu } from "./AssignMenu";
 import { EpicColorPicker } from "./EpicColorPicker";
+import { ResourceAvatar } from "./ResourceAvatar";
 import { ResourcesPane } from "./ResourcesPane";
 import { StatusSelect } from "./StatusSelect";
 import {
@@ -37,14 +46,22 @@ import {
   todayYmd,
 } from "./timeline";
 import { useDragResize } from "./useDragResize";
+import {
+  COLUMN_KEYS,
+  COLUMN_LABELS,
+  COLUMN_MIN,
+  LEFT_PANEL_MIN,
+  NAME_MIN_W,
+  fitColumns,
+  maxColumnWidth,
+  maxNameWidth,
+  type ColumnKey,
+} from "./columns";
 
-/** Min = fixed columns + a readable Name column. */
-const LEFT_MIN = 48 + 108 + 78 + 108 + 100 + 120;
+const LEFT_MIN = LEFT_PANEL_MIN;
 const LEFT_MAX = 960;
 const RES_DOCK_MIN = 96;
 const RES_DOCK_MAX = 560;
-/** # + Start + Dur + Status + Res (name column gets the rest) */
-const LEFT_FIXED_OTHER = 48 + 108 + 78 + 108 + 100;
 
 function isDoneStatus(status: string): boolean {
   return /done|closed|resolved|complete|ship/i.test(status || "");
@@ -119,6 +136,32 @@ function TaskWarnIcons({ task }: { task: GanttTask | undefined | null }) {
   );
 }
 
+/** Chevron that reveals a row's secondary info without changing the row height. */
+function DetailsToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      className={`pg-info-toggle${open ? " on" : ""}`}
+      title={open ? "Hide details" : "Show details"}
+      aria-label={open ? "Hide details" : "Show details"}
+      aria-expanded={open}
+      onClick={onToggle}
+    >
+      ⌄
+    </button>
+  );
+}
+
+/** Floating panel with the info that used to make every row two or three lines tall. */
+function RowDetails({ title, children }: { title: ReactNode; children?: ReactNode }) {
+  return (
+    <div className="pg-row-details">
+      <div className="pg-row-details-title">{title}</div>
+      {children}
+    </div>
+  );
+}
+
 type Pt = [number, number];
 
 /** Build an SVG path from orthogonal points with rounded corners. */
@@ -175,6 +218,60 @@ function depRoute(x1: number, y1: number, x2: number, y2: number): Pt[] {
   ];
 }
 
+function historyGhostTitle(
+  compareDate: string,
+  hist: HistoricalSchedule,
+  task: GanttTask,
+): string {
+  const then = `${hist.start ?? "—"} → ${hist.due ?? "—"} (${hist.durationDays}d)`;
+  const now = `${task.start ?? "—"} → ${task.due ?? "—"} (${task.durationDays}d)`;
+  return `As of ${compareDate}: ${then} · now: ${now}`;
+}
+
+function historyGhostForTask(
+  task: GanttTask,
+  historyOverlay: Map<string, HistoricalSchedule | null> | undefined,
+  compareDate: string | null | undefined,
+  days: ReturnType<typeof buildDays>,
+  holidaysOn: boolean,
+  dayWidth: number,
+): { geo: { left: number; width: number }; title: string } | null {
+  if (!historyOverlay || !compareDate || task.localOnly || task.pendingCreate) return null;
+  const hist = historyOverlay.get(task.id);
+  if (!hist || !historicalScheduleDiffers(hist, task) || !hist.start) return null;
+  const geo = barGeometry(days, hist.start, hist.durationDays, holidaysOn, dayWidth);
+  if (!geo) return null;
+  return { geo, title: historyGhostTitle(compareDate, hist, task) };
+}
+
+function ColumnResizeHandle({
+  label,
+  width,
+  min,
+  max,
+  onResize,
+  onReset,
+}: {
+  label: string;
+  width: number;
+  min: number;
+  max: number;
+  onResize: (width: number) => void;
+  onReset: () => void;
+}) {
+  const resize = useDragResize("x", onResize, { min, max });
+  return (
+    <span
+      className="pg-col-resize"
+      role="separator"
+      aria-orientation="vertical"
+      title={`Drag to resize ${label} · double-click to reset`}
+      onPointerDown={(e) => resize.begin(e, width)}
+      onDoubleClick={onReset}
+    />
+  );
+}
+
 interface Props {
   model: GanttModel;
   jiraBaseUrl: string;
@@ -182,9 +279,17 @@ interface Props {
   /** Screenshot-ready: hide editors, resize chrome, and resources dock. */
   preview?: boolean;
   /** Show loading overlay while syncing with Jira. */
-  loading?: "pull" | "push" | null;
+  loading?: "pull" | "push" | "history" | null;
   /** Optional detail under the loading spinner (e.g. push item count). */
   loadingDetail?: string | null;
+  /** When set, overlay ghost bars from Jira changelog as of this date (YYYY-MM-DD). */
+  compareDate?: string | null;
+  historyOverlay?: Map<string, HistoricalSchedule | null>;
+  /** overlay = ghosts on today; asOf = full board replaced (passed via model). */
+  historyViewMode?: HistoryViewMode | null;
+  historyViewLabel?: string | null;
+  /** Read-only timeline (as-of view) — no drag, status, or assignee edits. */
+  historyReadOnly?: boolean;
   onScheduleEdit: (taskId: string, patch: Partial<GanttTask>) => void;
   onStatusEdit: (
     taskId: string,
@@ -208,11 +313,16 @@ interface Props {
   onToggleHidden: (taskId: string) => void;
   onToggleHiddenFolder: () => void;
   onDeleteLocalMilestone: (taskId: string) => void;
+  onDeleteQaItem: (milestoneId: string) => void;
+  onEditQaItem: (milestoneId: string) => void;
   onDeleteDraftTask: (taskId: string) => void;
   onLayoutChange: (patch: Partial<GanttModel>) => void;
   onScrollChange?: (scroll: ScrollState) => void;
   onAddTask?: () => void;
   onAddMilestone?: () => void;
+  onAddIntegrationTest?: () => void;
+  onAddE2eFlow?: () => void;
+  onCollapseOrExpandAll?: () => void;
 }
 
 type DragMode =
@@ -241,6 +351,11 @@ export function GanttBoard({
   preview = false,
   loading = null,
   loadingDetail = null,
+  compareDate = null,
+  historyOverlay,
+  historyViewMode = null,
+  historyViewLabel = null,
+  historyReadOnly = false,
   onScheduleEdit,
   onStatusEdit,
   onResourceEdit,
@@ -252,19 +367,89 @@ export function GanttBoard({
   onToggleHidden,
   onToggleHiddenFolder,
   onDeleteLocalMilestone,
+  onDeleteQaItem,
+  onEditQaItem,
   onDeleteDraftTask,
   onLayoutChange,
   onScrollChange,
   onAddTask,
   onAddMilestone,
+  onAddIntegrationTest,
+  onAddE2eFlow,
+  onCollapseOrExpandAll,
 }: Props) {
+  const readOnly = preview || historyReadOnly;
   const hasEpics = model.milestones.some((m) => !m.localOnly);
+  const hasBoardTasks = useMemo(() => {
+    for (const m of model.milestones) {
+      if (m.localOnly) continue;
+      for (const t of m.tasks) {
+        if (!t.localOnly && !t.pendingCreate && !t.isMarker) return true;
+      }
+    }
+    return false;
+  }, [model.milestones]);
+  const deletableItems = useMemo((): DeletableTimelineItem[] => {
+    const out: DeletableTimelineItem[] = [];
+    for (const m of model.milestones) {
+      if (isLocalMilestoneRow(m)) {
+        out.push({
+          id: m.id,
+          label: m.title,
+          kind: "milestone",
+          confirmMessage: `Remove local milestone “${m.title}”?`,
+          onDelete: () => onDeleteLocalMilestone(m.id),
+        });
+        continue;
+      }
+      if (isQaMilestone(m)) {
+        const t = m.tasks.find((x) => x.id === m.id) || m.tasks[0];
+        const synced = !!(t?.pulledLinkedIssueKeys?.length);
+        out.push({
+          id: m.id,
+          label: m.title,
+          kind: m.qaKind || "integration",
+          confirmMessage: synced
+            ? `Remove ${qaKindLabel(m.qaKind || "integration")} “${m.title}”? Push to delete from Jira.`
+            : `Remove ${qaKindLabel(m.qaKind || "integration")} “${m.title}”?`,
+          onDelete: () => onDeleteQaItem(m.id),
+        });
+        continue;
+      }
+      for (const t of m.tasks) {
+        if (!t.pendingCreate) continue;
+        out.push({
+          id: t.id,
+          label: t.title,
+          kind: "draft",
+          confirmMessage: `Remove draft task “${t.title}”?`,
+          onDelete: () => onDeleteDraftTask(t.id),
+        });
+      }
+    }
+    return out;
+  }, [
+    model.milestones,
+    onDeleteDraftTask,
+    onDeleteLocalMilestone,
+    onDeleteQaItem,
+  ]);
+  const allEpicsCollapsed =
+    model.milestones.length > 0 && model.milestones.every((m) => m.collapsed);
   const holidaysOn = model.showHolidays;
   const dayWidth = model.dayWidthPx || 28;
   const leftW = model.leftPanelWidth || 680;
   const resDockH = model.resourcesDockHeight || 220;
   const resDockCollapsed = !!model.resourcesDockCollapsed;
-  const nameW = Math.max(120, leftW - LEFT_FIXED_OTHER);
+  /** Saved preferred widths; `columns` is how they render after any squeeze. */
+  const rawColumns = useMemo(
+    () => normalizeColumnWidths(model.columnWidths),
+    [model.columnWidths],
+  );
+  const { columns, nameW } = useMemo(
+    () => fitColumns(rawColumns, leftW),
+    [rawColumns, leftW],
+  );
   const tasksScrollRef = useRef<HTMLDivElement>(null);
   const resScrollRef = useRef<HTMLDivElement>(null);
   const syncingScroll = useRef(false);
@@ -287,6 +472,21 @@ export function GanttBoard({
       if (resEl) resEl.scrollLeft = initialScroll.resLeft || initialScroll.tasksLeft || 0;
     });
   }, [initialScroll, model.milestones.length, model.pulledAt]);
+
+  /**
+   * Store the column's new preferred width against the saved widths — never the
+   * squeezed ones — so the other columns spring back when the panel grows again.
+   * The space comes out of Name, which is what the drag visually takes it from.
+   */
+  function resizeColumn(key: ColumnKey, width: number) {
+    onLayoutChange({
+      columnWidths: {
+        ...rawColumns,
+        [key]: width,
+        name: Math.max(NAME_MIN_W, nameW - (width - rawColumns[key])),
+      },
+    });
+  }
 
   function emitScroll() {
     if (!onScrollChange) return;
@@ -361,11 +561,31 @@ export function GanttBoard({
   >(null);
 
   const [drag, setDrag] = useState<DragMode>(null);
+  /** Row whose secondary info panel is open — rows stay one line tall by default. */
+  const [detailsRow, setDetailsRow] = useState<string | null>(null);
   /** Ghost bar while placing a start date on an unscheduled task. */
   const [placeHover, setPlaceHover] = useState<{
     taskId: string;
     start: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (!detailsRow) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDetailsRow(null);
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.closest(".pg-row-details, .pg-info-toggle")) return;
+      setDetailsRow(null);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [detailsRow]);
 
   function startFromTrackPointer(
     e: ReactMouseEvent | ReactPointerEvent,
@@ -464,6 +684,7 @@ export function GanttBoard({
   }, [drag]);
 
   function beginDrag(mode: NonNullable<DragMode>, e: ReactPointerEvent) {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     dragRef.current = mode;
@@ -525,10 +746,25 @@ export function GanttBoard({
     ["--day-w" as string]: `${dayWidth}px`,
     ["--left-w" as string]: `${leftW}px`,
     ["--name-w" as string]: `${nameW}px`,
+    ["--col-start-w" as string]: `${columns.start}px`,
+    ["--col-dur-w" as string]: `${columns.dur}px`,
+    ["--col-status-w" as string]: `${columns.status}px`,
+    ["--col-res-w" as string]: `${columns.res}px`,
   } as React.CSSProperties;
 
   return (
-    <div className={`pg-shell${preview ? " pg-preview" : ""}`} style={shellStyle}>
+    <div
+      className={`pg-shell${preview ? " pg-preview" : ""}${
+        historyViewMode === "asOf" ? " pg-history-asof" : ""
+      }${historyViewMode === "overlay" ? " pg-history-overlay" : ""}`}
+      style={shellStyle}
+    >
+      {historyViewLabel && historyViewMode ? (
+        <div className="pg-history-banner" role="status">
+          {historyViewLabel}
+          {historyReadOnly ? " · read-only snapshot" : " · faded bars = then, solid = today"}
+        </div>
+      ) : null}
       {loading && (
         <div
           className={`pg-loading pg-loading-${loading}`}
@@ -538,7 +774,11 @@ export function GanttBoard({
           <div className={`pg-loadbar pg-loadbar-board${loading === "push" ? " push" : ""}`} />
           <span className="pg-spinner" aria-hidden />
           <span className="pg-loading-text">
-            {loading === "pull" ? "Pulling from Jira…" : "Pushing to Jira…"}
+            {loading === "pull"
+              ? "Pulling from Jira…"
+              : loading === "push"
+                ? "Pushing to Jira…"
+                : "Loading Jira history…"}
           </span>
           {loadingDetail ? (
             <span className="pg-loading-detail">{loadingDetail}</span>
@@ -602,44 +842,73 @@ export function GanttBoard({
                 <span className="pg-name-text" style={{ fontWeight: 700, color: "var(--muted)" }}>
                   Name
                 </span>
-                {!preview && (onAddTask || onAddMilestone) && (
+                {!preview &&
+                  (onCollapseOrExpandAll ||
+                    (!readOnly &&
+                      (onAddTask || onAddMilestone || onAddIntegrationTest || onAddE2eFlow))) && (
                   <div className="pg-board-actions">
-                    {onAddTask && (
-                      <button
-                        type="button"
-                        className="gantt-btn pg-board-action"
-                        disabled={!hasEpics}
-                        onClick={onAddTask}
-                        title="Add a draft task under an epic — Push creates it in Jira"
-                      >
-                        + Task
-                      </button>
+                    {!readOnly &&
+                      onAddTask &&
+                      onAddMilestone &&
+                      onAddIntegrationTest &&
+                      onAddE2eFlow && (
+                      <AddTimelineMenu
+                        hasEpics={hasEpics}
+                        hasBoardTasks={hasBoardTasks}
+                        deletableItems={deletableItems}
+                        onAddTask={onAddTask}
+                        onAddMilestone={onAddMilestone}
+                        onAddIntegrationTest={onAddIntegrationTest}
+                        onAddE2eFlow={onAddE2eFlow}
+                      />
                     )}
-                    {onAddMilestone && (
+                    {onCollapseOrExpandAll && (
                       <button
                         type="button"
                         className="gantt-btn pg-board-action"
-                        onClick={onAddMilestone}
-                        title="Add a top-level milestone (red star) — not synced to Jira"
+                        disabled={!model.milestones.length}
+                        onClick={onCollapseOrExpandAll}
+                        title={
+                          allEpicsCollapsed
+                            ? "Expand all epics and show their tasks"
+                            : "Collapse all epics and hide their tasks"
+                        }
                       >
-                        + Milestone
+                        {allEpicsCollapsed ? "Expand all" : "Collapse all"}
                       </button>
                     )}
                   </div>
                 )}
+                {!preview && (
+                  <ColumnResizeHandle
+                    label="Name"
+                    width={nameW}
+                    min={NAME_MIN_W}
+                    max={maxNameWidth(leftW)}
+                    onResize={(name) => onLayoutChange({ columnWidths: { ...rawColumns, name } })}
+                    onReset={() =>
+                      onLayoutChange({
+                        columnWidths: { ...rawColumns, name: DEFAULT_COLUMN_WIDTHS.name },
+                      })
+                    }
+                  />
+                )}
               </div>
-              <div className="pg-col-start" style={{ fontWeight: 700, color: "var(--muted)", fontSize: 11 }}>
-                Start
-              </div>
-              <div className="pg-col-dur" style={{ fontWeight: 700, color: "var(--muted)", fontSize: 11 }}>
-                Dur
-              </div>
-              <div className="pg-col-status" style={{ fontWeight: 700, color: "var(--muted)", fontSize: 11 }}>
-                Status
-              </div>
-              <div className="pg-col-res" style={{ fontWeight: 700, color: "var(--muted)", fontSize: 11 }}>
-                Res
-              </div>
+              {COLUMN_KEYS.map((key) => (
+                <div key={key} className={`pg-col-${key} pg-col-head`}>
+                  <span className="pg-col-head-label">{COLUMN_LABELS[key]}</span>
+                  {!preview && (
+                    <ColumnResizeHandle
+                      label={COLUMN_LABELS[key]}
+                      width={rawColumns[key]}
+                      min={COLUMN_MIN[key]}
+                      max={maxColumnWidth(key, rawColumns, nameW)}
+                      onResize={(width) => resizeColumn(key, width)}
+                      onReset={() => resizeColumn(key, DEFAULT_COLUMN_WIDTHS[key])}
+                    />
+                  )}
+                </div>
+              ))}
             </div>
             <div className="pg-track pg-head-track" style={{ width: trackW }}>
               <div className="pg-days" style={{ width: trackW }}>
@@ -677,46 +946,64 @@ export function GanttBoard({
           {rows.map((r) => {
             if (r.kind === "milestone") {
               const isHiddenFolder = !!r.isHiddenFolder;
-              const isLocalMs = !!r.milestone.localOnly && !isHiddenFolder;
+              const isQaRow = isQaMilestone(r.milestone);
+              const isLocalMs = isLocalMilestoneRow(r.milestone) && !isHiddenFolder;
               const epicSelf = isHiddenFolder
                 ? undefined
                 : r.milestone.tasks.find((t) => isEpicSelfTask(r.milestone.id, t));
-              const childCount = isHiddenFolder
-                ? r.milestone.tasks.length
+              const qaTask = isQaRow
+                ? r.milestone.tasks.find((t) => t.id === r.milestone.id) || r.milestone.tasks[0]
+                : undefined;
+              const childTasks = isHiddenFolder
+                ? r.milestone.tasks
                 : r.milestone.tasks.filter(
                     (t) => !isEpicSelfTask(r.milestone.id, t) && !t.hidden,
-                  ).length;
+                  );
+              const childCount = childTasks.length;
+              const doneChildCount = childTasks.filter((t) => isDoneStatus(t.status)).length;
+              /** Epic completion from its visible child stories; null when there are none. */
+              const donePct =
+                !isHiddenFolder && !isQaRow && !isLocalMs && childCount > 0
+                  ? Math.round((doneChildCount / childCount) * 100)
+                  : null;
               const span = isHiddenFolder ? null : milestoneSpan(r.milestone, holidaysOn);
-              // Use calendar-day bar for multi-task milestone summary; workday bar for epic self.
               const msGeo =
                 isHiddenFolder
                   ? null
-                  : !isLocalMs && epicSelf?.start
-                  ? barGeometry(
-                      days,
-                      epicSelf.start,
-                      epicSelf.durationDays,
-                      holidaysOn,
-                      dayWidth,
-                    )
-                  : !isLocalMs && span
-                    ? (() => {
-                        const si = days.findIndex((d) => d.ymd === span.start);
-                        const ei = days.findIndex((d) => d.ymd === span.end);
-                        if (si < 0 || ei < 0) return null;
-                        return {
-                          left: si * dayWidth,
-                          width: Math.max(dayWidth, (ei - si + 1) * dayWidth),
-                        };
-                      })()
-                    : null;
+                  : isQaRow && epicSelf?.start
+                    ? barGeometry(
+                        days,
+                        epicSelf.start,
+                        epicSelf.durationDays,
+                        holidaysOn,
+                        dayWidth,
+                      )
+                    : !isLocalMs && epicSelf?.start
+                      ? barGeometry(
+                          days,
+                          epicSelf.start,
+                          epicSelf.durationDays,
+                          holidaysOn,
+                          dayWidth,
+                        )
+                      : !isLocalMs && !isQaRow && span
+                        ? (() => {
+                            const si = days.findIndex((d) => d.ymd === span.start);
+                            const ei = days.findIndex((d) => d.ymd === span.end);
+                            if (si < 0 || ei < 0) return null;
+                            return {
+                              left: si * dayWidth,
+                              width: Math.max(dayWidth, (ei - si + 1) * dayWidth),
+                            };
+                          })()
+                        : null;
               const localDate = epicSelf?.start || epicSelf?.due || null;
               const localStarLeft =
-                isLocalMs && localDate
+                isLocalMs && !isQaRow && localDate
                   ? markerLeft(days, localDate, dayWidth)
                   : null;
               const canPlaceEpicSelf =
-                !preview &&
+                !readOnly &&
                 !!epicSelf &&
                 !epicSelf.start &&
                 !isLocalMs &&
@@ -732,11 +1019,39 @@ export function GanttBoard({
                   holidaysOn,
                   dayWidth,
                 );
+              const msRowKey = `ms-${r.milestone.id}`;
+              const msDetailsOpen = detailsRow === msRowKey;
+              const msQaKeys = (isQaRow && epicSelf?.linkedIssueKeys) || [];
+              /** QA rows collect assignees from every linked Jira issue, so there can be several. */
+              const qaAssignees = isQaRow
+                ? (epicSelf?.resourceIds || [])
+                    .map((rid) => model.resources.find((res) => res.id === rid))
+                    .filter((res): res is (typeof model.resources)[number] => !!res)
+                : [];
+              const msMeta = isHiddenFolder
+                ? "Hidden from timeline · expand to show or unhide"
+                : isQaRow
+                  ? qaTask?.dirty
+                    ? `${qaKindLabel(r.milestone.qaKind || "integration")} · Push to save on linked Jira issues`
+                    : `${qaKindLabel(r.milestone.qaKind || "integration")} · saved on linked Jira issues`
+                  : isLocalMs
+                    ? "Local milestone · not synced to Jira"
+                    : epicSelf
+                      ? `${epicSelf.assignee ? `${epicSelf.assignee} · ` : ""}${
+                          epicSelf.estDays != null ? `Est ${epicSelf.estDays}sp` : ""
+                        }${
+                          epicSelf.owner && epicSelf.owner !== "—"
+                            ? `${epicSelf.estDays != null ? " · " : ""}${epicSelf.owner}`
+                            : ""
+                        }`
+                      : "";
               return (
                 <div
-                  className={`pg-row milestone${isLocalMs ? " local-ms" : ""}${
-                    isHiddenFolder ? " hidden-folder" : ""
-                  }${epicSelf?.dirty ? " dirty" : ""}${
+                  className={`pg-row milestone${msDetailsOpen ? " details-open" : ""}${
+                    isLocalMs ? " local-ms" : ""
+                  }${
+                    isQaRow ? ` qa-row qa-${r.milestone.qaKind}` : ""
+                  }${isHiddenFolder ? " hidden-folder" : ""}${
                     !isHiddenFolder && msDrag === r.milestone.id ? " row-dragging" : ""
                   }${
                     !isHiddenFolder && msDropTarget?.id === r.milestone.id
@@ -777,8 +1092,20 @@ export function GanttBoard({
                         <span
                           className="pg-drag-handle"
                           draggable
-                          title={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
-                          aria-label={isLocalMs ? "Drag to reorder milestone" : "Drag to reorder epic"}
+                          title={
+                            isQaRow
+                              ? "Drag to reorder QA row"
+                              : isLocalMs
+                                ? "Drag to reorder milestone"
+                                : "Drag to reorder epic"
+                          }
+                          aria-label={
+                            isQaRow
+                              ? "Drag to reorder QA row"
+                              : isLocalMs
+                                ? "Drag to reorder milestone"
+                                : "Drag to reorder epic"
+                          }
                           onDragStart={(e) => {
                             setMsDrag(r.milestone.id);
                             e.dataTransfer.effectAllowed = "move";
@@ -793,9 +1120,15 @@ export function GanttBoard({
                         </span>
                       )}
                       <span className="pg-col-num-id">
-                        {isHiddenFolder ? "⊘" : isLocalMs ? "★" : childCount}
+                        {isHiddenFolder
+                          ? "⊘"
+                          : isQaRow && r.milestone.qaKind
+                            ? qaKindIcon(r.milestone.qaKind)
+                            : isLocalMs
+                              ? "★"
+                              : childCount}
                       </span>
-                      {epicSelf?.dirty ? (
+                      {epicSelf?.dirty || qaTask?.dirty ? (
                         <span className="pg-dirty-dot" title="Unpushed change" />
                       ) : null}
                     </div>
@@ -809,7 +1142,7 @@ export function GanttBoard({
                         >
                           {r.milestone.collapsed ? "▸" : "▾"}
                         </button>
-                      ) : isLocalMs ? (
+                      ) : isLocalMs || isQaRow ? (
                         <span className="pg-toggle pg-toggle-spacer" />
                       ) : childCount > 0 ? (
                         <button
@@ -827,6 +1160,13 @@ export function GanttBoard({
                         <span className="pg-hidden-folder-icon" title="Hidden tasks">
                           ⊘
                         </span>
+                      ) : isQaRow && r.milestone.qaKind ? (
+                        <span
+                          className={`pg-qa-kind-icon qa-${r.milestone.qaKind}`}
+                          title={qaKindLabel(r.milestone.qaKind)}
+                        >
+                          {qaKindIcon(r.milestone.qaKind)}
+                        </span>
                       ) : isLocalMs ? (
                         <span className="pg-local-ms-bullet" title="Local milestone">
                           ★
@@ -841,9 +1181,17 @@ export function GanttBoard({
                         />
                       )}
                       <div className="pg-name-stack">
-                        <span className="pg-name-text" style={{ fontWeight: 700 }}>
+                        <span
+                          className="pg-name-text"
+                          style={{ fontWeight: 700 }}
+                          title={r.milestone.title}
+                        >
                           {isHiddenFolder ? (
                             <span className="pg-hidden-folder-label">Folder</span>
+                          ) : isQaRow ? (
+                            <span className="pg-local-key">
+                              {r.milestone.qaKind === "e2e" ? "E2E" : "IT"}
+                            </span>
                           ) : isLocalMs ? (
                             <span className="pg-local-key">MS</span>
                           ) : (
@@ -856,25 +1204,37 @@ export function GanttBoard({
                             </a>
                           )}
                           {r.milestone.title}
-                          <TaskWarnIcons task={epicSelf} />
                         </span>
-                        <span className="pg-owner">
-                          {isHiddenFolder
-                            ? "Hidden from timeline · expand to show or unhide"
-                            : isLocalMs
-                              ? "Local milestone · not synced to Jira"
-                              : epicSelf
-                                ? `${epicSelf.assignee ? `${epicSelf.assignee} · ` : ""}${
-                                    epicSelf.estDays != null ? `Est ${epicSelf.estDays}sp` : ""
-                                  }${
-                                    epicSelf.owner && epicSelf.owner !== "—"
-                                      ? `${epicSelf.estDays != null ? " · " : ""}${epicSelf.owner}`
-                                      : ""
-                                  }`
-                                : ""}
-                        </span>
+                        <TaskWarnIcons task={epicSelf} />
                       </div>
-                      {isLocalMs && (
+                      {msMeta || msQaKeys.length ? (
+                        <DetailsToggle
+                          open={msDetailsOpen}
+                          onToggle={() => setDetailsRow(msDetailsOpen ? null : msRowKey)}
+                        />
+                      ) : null}
+                      {msDetailsOpen && (
+                        <RowDetails title={r.milestone.title}>
+                          {msQaKeys.length ? (
+                            <span className="pg-qa-chips">
+                              {msQaKeys.map((key) => (
+                                <a
+                                  key={key}
+                                  className="pg-qa-chip"
+                                  href={`${jiraBaseUrl}/browse/${key}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={`Linked Jira task ${key}`}
+                                >
+                                  {key}
+                                </a>
+                              ))}
+                            </span>
+                          ) : null}
+                          {msMeta ? <span className="pg-owner">{msMeta}</span> : null}
+                        </RowDetails>
+                      )}
+                      {isLocalMs && !readOnly && (
                         <button
                           type="button"
                           className="pg-local-delete"
@@ -885,14 +1245,37 @@ export function GanttBoard({
                           ×
                         </button>
                       )}
+                      {isQaRow && !readOnly && (
+                        <>
+                          <button
+                            type="button"
+                            className="pg-local-edit"
+                            title="Edit QA item"
+                            aria-label="Edit QA item"
+                            onClick={() => onEditQaItem(r.milestone.id)}
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            className="pg-local-delete"
+                            title="Delete QA item"
+                            aria-label="Delete QA item"
+                            onClick={() => onDeleteQaItem(r.milestone.id)}
+                          >
+                            ×
+                          </button>
+                        </>
+                      )}
                     </div>
-                    {isLocalMs && epicSelf ? (
+                    {isLocalMs && !isQaRow && epicSelf ? (
                       <>
                         <div className="pg-col-start">
                           <input
                             className="pg-input"
                             type="date"
                             value={epicSelf.start || ""}
+                            disabled={readOnly}
                             onChange={(e) => {
                               const startVal = e.target.value || null;
                               onScheduleEdit(epicSelf.id, {
@@ -916,13 +1299,62 @@ export function GanttBoard({
                           </span>
                         </div>
                       </>
-                    ) : epicSelf ? (
+                    ) : isQaRow && epicSelf ? (
                       <>
                         <div className="pg-col-start">
                           <input
                             className="pg-input"
                             type="date"
                             value={epicSelf.start || ""}
+                            disabled={readOnly}
+                            onChange={(e) => {
+                              const startVal = e.target.value || null;
+                              onScheduleEdit(epicSelf.id, { start: startVal });
+                            }}
+                          />
+                        </div>
+                        <div className="pg-col-dur">
+                          <input
+                            className="pg-input dur"
+                            type="number"
+                            min={1}
+                            value={epicSelf.durationDays}
+                            disabled={readOnly}
+                            onChange={(e) => {
+                              const durationDays = Math.max(1, Number(e.target.value) || 1);
+                              onScheduleEdit(epicSelf.id, { durationDays });
+                            }}
+                          />
+                          <span className="pg-dur-suffix">d</span>
+                        </div>
+                        <div className="pg-col-status">
+                          <span className="pg-status-pill qa">QA</span>
+                        </div>
+                        <div className="pg-col-res pg-qa-res">
+                          {qaAssignees.length ? (
+                            qaAssignees.map((resource) => (
+                              <ResourceAvatar
+                                key={resource.id}
+                                resource={resource}
+                                className="pg-qa-res-avatar"
+                                title={`From linked Jira assignee · ${resource.name}`}
+                              />
+                            ))
+                          ) : (
+                            <span className="pg-assign-empty" title="No assignees on linked tasks">
+                              —
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    ) : epicSelf && !isQaRow ? (
+                      <>
+                        <div className="pg-col-start">
+                          <input
+                            className="pg-input"
+                            type="date"
+                            value={epicSelf.start || ""}
+                            disabled={readOnly}
                             onChange={(e) => {
                               const startVal = e.target.value || null;
                               const due = startVal
@@ -948,6 +1380,7 @@ export function GanttBoard({
                                 : "Story Points (Dur)"
                             }
                             value={epicSelf.estDays ?? ""}
+                            disabled={readOnly}
                             onChange={(e) => {
                               const raw = e.target.value;
                               if (raw === "") {
@@ -979,6 +1412,7 @@ export function GanttBoard({
                             transitionId={epicSelf.transitionId}
                             durationDays={epicSelf.durationDays}
                             timeSpent={epicSelf.timeSpent}
+                            disabled={readOnly}
                             onChange={(next) => onStatusEdit(epicSelf.id, next)}
                           />
                         </div>
@@ -987,7 +1421,7 @@ export function GanttBoard({
                             resources={model.resources}
                             selected={epicSelf.resourceIds}
                             pulledSelected={epicSelf.pulledResourceIds ?? epicSelf.resourceIds}
-                            disabled={preview}
+                            disabled={readOnly}
                             issueKey={epicSelf.id}
                             onChange={(resourceId) => onResourceEdit(epicSelf.id, resourceId)}
                           />
@@ -1062,7 +1496,30 @@ export function GanttBoard({
                         </span>
                       </div>
                     )}
-                    {isLocalMs && localStarLeft != null && epicSelf ? (
+                    {epicSelf &&
+                      (() => {
+                        const hg = historyGhostForTask(
+                          epicSelf,
+                          historyOverlay,
+                          compareDate,
+                          days,
+                          holidaysOn,
+                          dayWidth,
+                        );
+                        if (!hg) return null;
+                        return (
+                          <div
+                            className="pg-bar pg-bar-history-ghost"
+                            style={{
+                              left: hg.geo.left,
+                              width: hg.geo.width,
+                              background: r.milestone.color,
+                            }}
+                            title={hg.title}
+                          />
+                        );
+                      })()}
+                    {isLocalMs && !isQaRow && localStarLeft != null && epicSelf ? (
                       <div
                         className={`pg-milestone-star${
                           drag?.taskId === epicSelf.id ? " dragging" : ""
@@ -1089,9 +1546,11 @@ export function GanttBoard({
                       </div>
                     ) : msGeo ? (
                       <div
-                        className={`pg-bar milestone-bar${
-                          isOverdue(epicSelf) ? " overdue" : ""
-                        }${isStartLate(epicSelf) ? " start-late" : ""}${
+                        className={`pg-bar milestone-bar${isQaRow ? " qa-bar" : ""}${
+                          !isQaRow && isOverdue(epicSelf) ? " overdue" : ""
+                        }${!isQaRow && isStartLate(epicSelf) ? " start-late" : ""}${
+                          !isQaRow && epicSelf && isDoneStatus(epicSelf.status) ? " done" : ""
+                        }${
                           epicSelf && drag?.taskId === epicSelf.id
                             ? drag.kind === "resize"
                               ? " resizing"
@@ -1104,11 +1563,20 @@ export function GanttBoard({
                           background: r.milestone.color,
                         }}
                         title={
-                          isOverdue(epicSelf) && epicSelf?.due
-                            ? `Overdue — due ${epicSelf.due}`
-                            : isStartLate(epicSelf) && epicSelf
-                              ? `Should have started ${epicSelf.start} — still “${epicSelf.status}”`
-                              : undefined
+                          [
+                            donePct != null
+                              ? `${doneChildCount} of ${childCount} tasks done (${donePct}%)`
+                              : null,
+                            epicSelf && isDoneStatus(epicSelf.status)
+                              ? `Done — ${epicSelf.status}`
+                              : isOverdue(epicSelf) && epicSelf?.due
+                                ? `Overdue — due ${epicSelf.due}`
+                                : isStartLate(epicSelf) && epicSelf
+                                  ? `Should have started ${epicSelf.start} — still “${epicSelf.status}”`
+                                  : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") || undefined
                         }
                         onPointerDown={
                           epicSelf?.start
@@ -1128,18 +1596,30 @@ export function GanttBoard({
                             : undefined
                         }
                       >
+                        {donePct != null && (
+                          <span
+                            className={`pg-bar-fill${donePct >= 100 ? " full" : ""}`}
+                            style={{ width: `${donePct}%` }}
+                            aria-hidden
+                          />
+                        )}
+                        {donePct != null && (
+                          <span className="pg-bar-pct">{donePct}%</span>
+                        )}
                         {epicSelf && (
                           <>
                             <span className="pg-bar-label">
-                              {epicSelf.estDays != null
-                                ? `${epicSelf.estDays}sp`
-                                : r.milestone.id}
+                              {isQaRow
+                                ? `${qaKindIcon(r.milestone.qaKind || "integration")} ${r.milestone.title}`
+                                : epicSelf.estDays != null
+                                  ? `${epicSelf.estDays}sp`
+                                  : r.milestone.id}
                             </span>
-                            {isOverdue(epicSelf) ? (
+                            {!isQaRow && isOverdue(epicSelf) ? (
                               <span className="pg-bar-overdue" aria-hidden>
                                 !
                               </span>
-                            ) : isStartLate(epicSelf) ? (
+                            ) : !isQaRow && isStartLate(epicSelf) ? (
                               <span className="pg-bar-start-late" aria-hidden>
                                 S
                               </span>
@@ -1166,6 +1646,23 @@ export function GanttBoard({
                         )}
                       </div>
                     ) : null}
+                    {isQaRow && msGeo && qaAssignees.length > 0 && (
+                      <span
+                        className="pg-bar-assignees"
+                        style={{ left: msGeo.left + msGeo.width + 6 }}
+                        title={`Assignees on linked Jira issues · ${qaAssignees
+                          .map((res) => res.name)
+                          .join(", ")}`}
+                      >
+                        {qaAssignees.map((res) => (
+                          <ResourceAvatar
+                            key={res.id}
+                            resource={res}
+                            className="pg-bar-avatar"
+                          />
+                        ))}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -1176,7 +1673,7 @@ export function GanttBoard({
             const geo =
               t.start &&
               barGeometry(days, t.start, t.durationDays, holidaysOn, dayWidth);
-            const canPlace = !preview && !t.start && !t.isMarker && !inHiddenFolder;
+            const canPlace = !readOnly && !t.start && !t.isMarker && !inHiddenFolder;
             const placeGhost =
               canPlace &&
               placeHover?.taskId === t.id &&
@@ -1187,6 +1684,17 @@ export function GanttBoard({
                 holidaysOn,
                 dayWidth,
               );
+
+            const taskDetailsOpen = detailsRow === `task-${t.id}`;
+            const taskMeta = inHiddenFolder
+              ? `Hidden · ${r.milestone.title}`
+              : t.localOnly
+                ? "Local only · not synced to Jira"
+                : t.pendingCreate
+                  ? `Draft · will create under ${t.createEpicId || "epic"} on Push`
+                  : `${t.assignee ? `${t.assignee} · ` : ""}${t.owner}`;
+            const taskBlockers =
+              !t.localOnly && !t.pendingCreate && t.blockedBy.length > 0 ? t.blockedBy : [];
 
             const isRowDragging = !inHiddenFolder && rowDrag?.taskId === t.id;
             const dropCls =
@@ -1200,7 +1708,9 @@ export function GanttBoard({
               <div
                 className={`pg-row task${t.dirty ? " dirty" : ""}${
                   inHiddenFolder ? " is-hidden" : ""
-                }${isRowDragging ? " row-dragging" : ""}${dropCls}`}
+                }${taskDetailsOpen ? " details-open" : ""}${
+                  isRowDragging ? " row-dragging" : ""
+                }${dropCls}`}
                 key={inHiddenFolder ? `hidden-${t.id}` : t.id}
                 onDragOver={(e) => {
                   if (inHiddenFolder || !rowDrag || rowDrag.milestoneId !== r.milestone.id)
@@ -1258,7 +1768,7 @@ export function GanttBoard({
                       style={{ background: colorForTask(t) }}
                     />
                     <div className="pg-name-stack">
-                      <span className="pg-name-text">
+                      <span className="pg-name-text" title={t.title}>
                         {t.localOnly ? (
                           <span className="pg-local-key" title="Local milestone">
                             ★ MS
@@ -1277,22 +1787,24 @@ export function GanttBoard({
                           </a>
                         )}
                         {t.title}
-                        <TaskWarnIcons task={t} />
                       </span>
-                      <span className="pg-owner">
-                        {inHiddenFolder
-                          ? `Hidden · ${r.milestone.title}`
-                          : t.localOnly
-                            ? "Local only · not synced to Jira"
-                            : t.pendingCreate
-                              ? `Draft · will create under ${t.createEpicId || "epic"} on Push`
-                              : `${t.assignee ? `${t.assignee} · ` : ""}${t.owner}`}
-                      </span>
-                      {!t.localOnly && !t.pendingCreate && t.blockedBy.length > 0 && (
-                        <span className="pg-prereq-hint">{t.blockedBy.join(", ")}</span>
-                      )}
+                      <TaskWarnIcons task={t} />
                     </div>
+                    {taskDetailsOpen && (
+                      <RowDetails title={t.title}>
+                        <span className="pg-owner">{taskMeta}</span>
+                        {taskBlockers.length ? (
+                          <span className="pg-prereq-hint">{taskBlockers.join(", ")}</span>
+                        ) : null}
+                      </RowDetails>
+                    )}
                     <div className="pg-name-actions">
+                      <DetailsToggle
+                        open={taskDetailsOpen}
+                        onToggle={() =>
+                          setDetailsRow(taskDetailsOpen ? null : `task-${t.id}`)
+                        }
+                      />
                       {!t.localOnly && (
                         <button
                           type="button"
@@ -1348,6 +1860,7 @@ export function GanttBoard({
                       className="pg-input"
                       type="date"
                       value={t.start || ""}
+                      disabled={readOnly}
                       onChange={(e) => {
                         const startVal = e.target.value || null;
                         const due = startVal
@@ -1369,6 +1882,7 @@ export function GanttBoard({
                           type="number"
                           min={1}
                           placeholder="—"
+                          disabled={readOnly}
                           title={
                             t.estDays == null ? "No Story Points in Jira" : "Story Points (Dur)"
                           }
@@ -1411,6 +1925,7 @@ export function GanttBoard({
                         transitionId={t.transitionId}
                         durationDays={t.durationDays}
                         timeSpent={t.timeSpent}
+                        disabled={readOnly}
                         onChange={(next) => onStatusEdit(t.id, next)}
                       />
                     )}
@@ -1425,7 +1940,7 @@ export function GanttBoard({
                         resources={model.resources}
                         selected={t.resourceIds}
                         pulledSelected={t.pulledResourceIds ?? t.resourceIds}
-                        disabled={preview}
+                        disabled={readOnly}
                         issueKey={t.id}
                         onChange={(resourceId) => onResourceEdit(t.id, resourceId)}
                       />
@@ -1485,6 +2000,28 @@ export function GanttBoard({
                       <span className="pg-bar-ghost-hint">Set {placeHover!.start}</span>
                     </div>
                   )}
+                  {(() => {
+                    const hg = historyGhostForTask(
+                      t,
+                      historyOverlay,
+                      compareDate,
+                      days,
+                      holidaysOn,
+                      dayWidth,
+                    );
+                    if (!hg) return null;
+                    return (
+                      <div
+                        className="pg-bar pg-bar-history-ghost"
+                        style={{
+                          left: hg.geo.left,
+                          width: hg.geo.width,
+                          background: colorForTask(t),
+                        }}
+                        title={hg.title}
+                      />
+                    );
+                  })()}
                   {!inHiddenFolder && t.isMarker ? (
                     (() => {
                       const md = t.start || t.due;
@@ -1522,6 +2059,8 @@ export function GanttBoard({
                       className={`pg-bar${
                         isOverdue(t) ? " overdue" : ""
                       }${isStartLate(t) ? " start-late" : ""}${
+                        isDoneStatus(t.status) ? " done" : ""
+                      }${
                         drag?.taskId === t.id
                           ? drag.kind === "resize"
                             ? " resizing"
@@ -1534,11 +2073,13 @@ export function GanttBoard({
                         background: colorForTask(t),
                       }}
                       title={
-                        isOverdue(t) && t.due
-                          ? `Overdue — due ${t.due}`
-                          : isStartLate(t)
-                            ? `Should have started ${t.start} — still “${t.status}”`
-                            : undefined
+                        isDoneStatus(t.status)
+                          ? `Done — ${t.status}`
+                          : isOverdue(t) && t.due
+                            ? `Overdue — due ${t.due}`
+                            : isStartLate(t)
+                              ? `Should have started ${t.start} — still “${t.status}”`
+                              : undefined
                       }
                       onPointerDown={(e) => {
                         if (!t.start) return;

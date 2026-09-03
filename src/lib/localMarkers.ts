@@ -1,4 +1,5 @@
 import type { GanttModel, GanttTask, LocalMarker, Milestone } from "./types";
+import { isQaMilestone } from "./qaItems";
 
 export function newLocalMarkerId(): string {
   return `local:ms-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -44,6 +45,7 @@ export function collectLocalMarkers(model: GanttModel): LocalMarker[] {
   const seen = new Set<string>();
 
   for (const epic of model.milestones) {
+    if (isQaMilestone(epic)) continue;
     if (epic.localOnly) {
       const t = epic.tasks.find((x) => x.id === epic.id) || epic.tasks[0];
       const start = t?.start || t?.due;
@@ -84,26 +86,28 @@ export function injectLocalMarkers(
   orderHint?: string[],
 ): GanttModel {
   // Strip nested legacy local tasks and any prior local-only rows.
+  const qaRows = model.milestones.filter((m) => isQaMilestone(m));
   const jiraEpics = model.milestones
-    .filter((m) => !m.localOnly)
+    .filter((m) => !m.localOnly && !isQaMilestone(m))
     .map((m) => ({
       ...m,
       tasks: m.tasks.filter((t) => !t.localOnly),
     }));
 
   if (!markers.length) {
-    return { ...model, milestones: jiraEpics };
+    return { ...model, milestones: [...qaRows, ...jiraEpics] };
   }
 
   const localRows = markers.map(localMarkerToMilestone);
   const byId = new Map<string, Milestone>();
   for (const m of jiraEpics) byId.set(m.id, m);
+  for (const m of qaRows) byId.set(m.id, m);
   for (const m of localRows) byId.set(m.id, m);
 
   const order =
     orderHint && orderHint.length
       ? orderHint
-      : [...jiraEpics.map((m) => m.id), ...localRows.map((m) => m.id)];
+      : [...jiraEpics.map((m) => m.id), ...qaRows.map((m) => m.id), ...localRows.map((m) => m.id)];
 
   return {
     ...model,

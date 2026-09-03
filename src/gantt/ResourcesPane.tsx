@@ -21,6 +21,7 @@ function hoursForResource(
   if (isNonWorking(day, holidaysOn)) return 0;
   for (const m of model.milestones) {
     for (const t of m.tasks) {
+      if (t.qaKind) continue;
       if (!t.start || !t.resourceIds.includes(resourceId)) continue;
       const end = taskEnd(t.start, t.durationDays, holidaysOn);
       const s = parseYmd(t.start);
