@@ -67,6 +67,40 @@ function isDoneStatus(status: string): boolean {
   return /done|closed|resolved|complete|ship/i.test(status || "");
 }
 
+function JiraIssueLink({
+  baseUrl,
+  issueKey,
+  className,
+  title,
+  children,
+}: {
+  baseUrl: string;
+  issueKey: string;
+  className?: string;
+  title?: string;
+  children?: ReactNode;
+}) {
+  const label = children ?? issueKey;
+  if (!baseUrl) {
+    return (
+      <span className={className} title={title}>
+        {label}
+      </span>
+    );
+  }
+  return (
+    <a
+      className={className}
+      href={`${baseUrl.replace(/\/$/, "")}/browse/${issueKey}`}
+      target="_blank"
+      rel="noreferrer"
+      title={title}
+    >
+      {label}
+    </a>
+  );
+}
+
 /** Still waiting to start (Ready for Dev / To Do / etc). */
 function isReadyForDevStatus(status: string): boolean {
   const s = (status || "").toLowerCase();
@@ -736,7 +770,7 @@ export function GanttBoard({
         <div className="pg-empty">
           No tasks yet. Enter a JQL (or epic keys) and press <strong>Pull</strong>.
           <br />
-          Example: <code>project = SBT AND parent = SBT-61018</code>
+          Example: <code>project = PROJ AND parent = PROJ-100</code>
         </div>
       </div>
     );
@@ -1195,13 +1229,9 @@ export function GanttBoard({
                           ) : isLocalMs ? (
                             <span className="pg-local-key">MS</span>
                           ) : (
-                            <a
-                              href={`${jiraBaseUrl}/browse/${r.milestone.id}`}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
+                            <JiraIssueLink baseUrl={jiraBaseUrl} issueKey={r.milestone.id}>
                               {r.milestone.id}
-                            </a>
+                            </JiraIssueLink>
                           )}
                           {r.milestone.title}
                         </span>
@@ -1218,16 +1248,15 @@ export function GanttBoard({
                           {msQaKeys.length ? (
                             <span className="pg-qa-chips">
                               {msQaKeys.map((key) => (
-                                <a
+                                <JiraIssueLink
                                   key={key}
                                   className="pg-qa-chip"
-                                  href={`${jiraBaseUrl}/browse/${key}`}
-                                  target="_blank"
-                                  rel="noreferrer"
+                                  baseUrl={jiraBaseUrl}
+                                  issueKey={key}
                                   title={`Linked Jira task ${key}`}
                                 >
                                   {key}
-                                </a>
+                                </JiraIssueLink>
                               ))}
                             </span>
                           ) : null}
@@ -1778,13 +1807,9 @@ export function GanttBoard({
                             NEW
                           </span>
                         ) : (
-                          <a
-                            href={`${jiraBaseUrl}/browse/${t.id}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
+                          <JiraIssueLink baseUrl={jiraBaseUrl} issueKey={t.id}>
                             {t.id}
-                          </a>
+                          </JiraIssueLink>
                         )}
                         {t.title}
                       </span>

@@ -14,6 +14,7 @@ import {
   DEFAULT_COLORS,
   MILESTONE_COLORS,
   QA_PROPERTY_KEY,
+  QA_PROPERTY_KEY_LEGACY,
   normalizeColumnWidths,
 } from "../src/lib/types.ts";
 import {
@@ -314,7 +315,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     fieldMap.epicLink,
   ];
 
-  const issues = await searchAll(jql, fields, [QA_PROPERTY_KEY]);
+  const issues = await searchAll(jql, fields, [QA_PROPERTY_KEY, QA_PROPERTY_KEY_LEGACY]);
 
   // QA items (integration tests / E2E flows) ride along as an issue property on
   // each linked ticket. Search only returns properties it was asked for, so any
@@ -322,9 +323,9 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
   const qaCollected: QaItem[] = [];
   const needsPropertyFetch: string[] = [];
   for (const issue of issues) {
-    const prop = issue.properties?.[QA_PROPERTY_KEY]?.value;
-    if (prop) {
-      qaCollected.push(...parseQaProperty(prop));
+    const fromSearch = qaItemsFromProperties(issue.properties);
+    if (fromSearch.length || hasQaProperty(issue.properties)) {
+      qaCollected.push(...fromSearch);
     } else {
       needsPropertyFetch.push(issue.key);
     }
@@ -335,12 +336,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       await Promise.all(
         chunk.map(async (key) => {
           try {
-            const res = await jiraFetch(
-              `/rest/api/3/issue/${encodeURIComponent(key)}/properties/${encodeURIComponent(QA_PROPERTY_KEY)}`,
-            );
-            if (!res.ok) return;
-            const data = (await res.json()) as { value?: unknown };
-            qaCollected.push(...parseQaProperty(data.value));
+            qaCollected.push(...(await fetchQaItemsForIssue(key)));
           } catch {
             /* non-fatal */
           }
@@ -639,9 +635,23 @@ export async function fetchChangelogs(keys: string[]): Promise<{
   return { changelogs, fieldMap };
 }
 
-async function getQaItemsOnHost(issueKey: string): Promise<QaItem[]> {
+const QA_PROPERTY_KEYS = [QA_PROPERTY_KEY, QA_PROPERTY_KEY_LEGACY];
+
+function hasQaProperty(properties?: Record<string, { value?: unknown }>): boolean {
+  if (!properties) return false;
+  return QA_PROPERTY_KEYS.some((key) => key in properties);
+}
+
+function qaItemsFromProperties(properties?: Record<string, { value?: unknown }>): QaItem[] {
+  if (!properties) return [];
+  return dedupeQaItems(
+    QA_PROPERTY_KEYS.flatMap((key) => parseQaProperty(properties[key]?.value)),
+  );
+}
+
+async function fetchQaProperty(issueKey: string, propKey: string): Promise<QaItem[]> {
   const res = await jiraFetch(
-    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(QA_PROPERTY_KEY)}`,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(propKey)}`,
   );
   if (res.status === 404) return [];
   if (!res.ok) {
@@ -650,20 +660,39 @@ async function getQaItemsOnHost(issueKey: string): Promise<QaItem[]> {
       `read QA property on ${issueKey} failed (${res.status}): ${text.slice(0, 200)}`,
     );
   }
-  const data = (await res.json()) as { value?: QaPropertyPayload };
-  return Array.isArray(data.value?.items) ? data.value.items : [];
+  const data = (await res.json()) as { value?: unknown };
+  return parseQaProperty(data.value);
+}
+
+async function fetchQaItemsForIssue(issueKey: string): Promise<QaItem[]> {
+  const batches = await Promise.all(
+    QA_PROPERTY_KEYS.map((key) => fetchQaProperty(issueKey, key)),
+  );
+  return dedupeQaItems(batches.flat());
+}
+
+async function deleteQaProperty(issueKey: string, propKey: string): Promise<void> {
+  const del = await jiraFetch(
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(propKey)}`,
+    { method: "DELETE" },
+  );
+  if (!del.ok && del.status !== 404) {
+    const text = await del.text();
+    throw new Error(
+      `delete QA property on ${issueKey} failed (${del.status}): ${text.slice(0, 200)}`,
+    );
+  }
+}
+
+async function getQaItemsOnHost(issueKey: string): Promise<QaItem[]> {
+  return fetchQaItemsForIssue(issueKey);
 }
 
 async function putQaItemsOnHost(issueKey: string, items: QaItem[]): Promise<void> {
   const propertyPath = `/rest/api/3/issue/${encodeURIComponent(issueKey)}/properties/${encodeURIComponent(QA_PROPERTY_KEY)}`;
   if (!items.length) {
-    const del = await jiraFetch(propertyPath, { method: "DELETE" });
-    if (!del.ok && del.status !== 404) {
-      const text = await del.text();
-      throw new Error(
-        `delete QA property on ${issueKey} failed (${del.status}): ${text.slice(0, 200)}`,
-      );
-    }
+    await deleteQaProperty(issueKey, QA_PROPERTY_KEY);
+    await deleteQaProperty(issueKey, QA_PROPERTY_KEY_LEGACY);
     return;
   }
   const payload: QaPropertyPayload = { v: 1, items };
@@ -677,6 +706,8 @@ async function putQaItemsOnHost(issueKey: string, items: QaItem[]): Promise<void
       `write QA property on ${issueKey} failed (${res.status}): ${text.slice(0, 200)}`,
     );
   }
+  // Migrate off the old key once the current one is written.
+  await deleteQaProperty(issueKey, QA_PROPERTY_KEY_LEGACY);
 }
 
 /** Upsert a QA item on every linked host; remove it from hosts no longer linked. */
