@@ -2611,7 +2611,7 @@ body.pg-resizing-bar .pg-board {
 }
 .app-footer-quote,
 .app-footer-credit,
-.app-footer-slack {
+.app-footer-github {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2622,12 +2622,12 @@ body.pg-resizing-bar .pg-board {
 }
 .app-footer-quote:hover,
 .app-footer-credit:hover,
-.app-footer-slack:hover {
+.app-footer-github:hover {
   color: var(--sky-600);
 }
 .app-footer-quote:focus-visible,
 .app-footer-credit:focus-visible,
-.app-footer-slack:focus-visible {
+.app-footer-github:focus-visible {
   outline: 2px solid var(--sky);
   outline-offset: 2px;
 }
@@ -2651,7 +2651,7 @@ body.pg-resizing-bar .pg-board {
 .app-footer-credit:hover {
   color: var(--sky-600);
 }
-.app-footer-slack {
+.app-footer-github {
   margin-left: 2px;
   padding: 4px 9px;
   border: 1px solid var(--line);
@@ -2661,12 +2661,12 @@ body.pg-resizing-bar .pg-board {
   font-size: 11px;
   color: var(--ink);
 }
-.app-footer-slack:hover {
+.app-footer-github:hover {
   border-color: var(--sky);
   background: var(--sky-050);
   color: var(--sky-600);
 }
-.app-footer-slack-icon {
+.app-footer-github-icon {
   flex: none;
   display: block;
 }

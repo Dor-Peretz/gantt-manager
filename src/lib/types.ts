@@ -9,7 +9,7 @@ export interface Resource {
 }
 
 export interface GanttTask {
-  /** Jira issue key, e.g. SBT-62906 */
+  /** Jira issue key, e.g. PROJ-123 */
   id: string;
   /** Friendly id from summary prefix, e.g. M1-T1 */
   friendlyId: string;
@@ -107,7 +107,10 @@ export interface QaItem {
   linkedIssueKeys: string[];
 }
 
-export const QA_PROPERTY_KEY = "sunbit.gantt.qa";
+/** Jira issue property that stores QA timeline rows on linked issues. */
+export const QA_PROPERTY_KEY = "gantt.qa";
+/** Previous property key — still read so existing rows keep loading. */
+export const QA_PROPERTY_KEY_LEGACY = "sunbit.gantt.qa";
 
 export const QA_COLORS: Record<QaKind, string> = {
   integration: "#0d9488",

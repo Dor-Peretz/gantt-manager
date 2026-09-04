@@ -273,7 +273,7 @@ export default function App() {
   const [jql, setJql] = useState("");
   const [savedJqls, setSavedJqls] = useState<SavedJql[]>([]);
   const [activeSavedJqlId, setActiveSavedJqlId] = useState<string | null>(null);
-  const [jiraBaseUrl, setJiraBaseUrl] = useState("https://sunbit.atlassian.net");
+  const [jiraBaseUrl, setJiraBaseUrl] = useState("");
   const [health, setHealth] = useState<{
     ok: boolean;
     site?: string;
@@ -1553,7 +1553,7 @@ export default function App() {
           className="pg-jql"
           value={jql}
           onChange={(e) => onJqlChange(e.target.value)}
-          placeholder='JQL — e.g. project = SBT AND parent = SBT-61018'
+          placeholder="JQL — e.g. project = PROJ AND parent = PROJ-100"
           spellCheck={false}
           title="Saved to preferences.json as you type"
         />

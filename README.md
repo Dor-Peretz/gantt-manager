@@ -25,7 +25,7 @@ Brand assets live in `public/favicon.svg`, `public/apple-touch-icon.svg`, and `s
 
 ### QA rows
 
-Integration tests and E2E flows planned as their own rows on the board. Each one links to the tickets it covers, takes its assignees from those tickets, and is stored **on those Jira issues** as the `sunbit.gantt.qa` issue property — so teammates pulling the same JQL see it too. A QA row appears only when at least one of its linked tickets is on the board.
+Integration tests and E2E flows planned as their own rows on the board. Each one links to the tickets it covers, takes its assignees from those tickets, and is stored **on those Jira issues** as the `gantt.qa` issue property — so teammates pulling the same JQL see it too. A QA row appears only when at least one of its linked tickets is on the board.
 
 ### History
 
@@ -58,7 +58,7 @@ Fill in `.env`:
 
 | Variable | Description |
 |----------|-------------|
-| `JIRA_BASE_URL` | e.g. `https://sunbit.atlassian.net` |
+| `JIRA_BASE_URL` | e.g. `https://your-site.atlassian.net` |
 | `JIRA_EMAIL` | Your Atlassian account email |
 | `JIRA_API_TOKEN` | [Create an API token](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `JIRA_JQL` | Default JQL for Pull (editable in the toolbar) |
@@ -66,7 +66,7 @@ Fill in `.env`:
 
 The token needs permission to **read** and **write** Jira issues (Start date, Due date, transitions, issue properties).
 
-Never commit `.env`.
+Replace the placeholders in `.env` with your own Jira site, email, and token. Never commit `.env`.
 
 ## Run
 
@@ -93,7 +93,7 @@ Then open http://localhost:8787.
 1. Enter JQL (or use the default), e.g.
 
    ```
-   (key = SBT-61016 OR issuekey in portfolioChildIssuesOf(SBT-61016)) AND status != Canceled ORDER BY summary ASC
+   (key = PROJ-100 OR issuekey in portfolioChildIssuesOf(PROJ-100)) AND status != Canceled ORDER BY summary ASC
    ```
 
    **Save JQL** stores it under a name; the dropdown switches between saved queries.
@@ -115,13 +115,13 @@ Then open http://localhost:8787.
 | Milestone | Epic (parent) |
 | Task | Story / Task (or the epic itself when it has no children) |
 | Friendly id | Summary prefix `[M1-T1] …` |
-| Start | Start date (`customfield_10907`, auto-discovered) |
+| Start | Start date (discovered by field name) |
 | Due / Duration | Due date ↔ working days (Sun–Thu, ± IL holidays) |
 | Estimate | Story Points (shown on empty epics; used when dates are incomplete) |
 | Prerequisites | “Blocks” issue links (blocked by) — read-only |
 | Status | Issue status; Push via transitions (Done also logs a worklog) |
 | Assignee | Display + resource hours; Push reassigns when changed in-app |
-| QA row | `sunbit.gantt.qa` issue property on each linked issue |
+| QA row | `gantt.qa` issue property on each linked issue |
 | History | Issue changelog + creation date |
 
 ## API

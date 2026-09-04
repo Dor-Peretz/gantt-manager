@@ -1,5 +1,5 @@
 {
-  "jql": "project = SBT AND parent = SBT-61018 ORDER BY rank ASC",
+  "jql": "project = PROJ AND parent = PROJ-100 ORDER BY rank ASC",
   "savedJqls": [],
   "activeSavedJqlId": null,
   "projectStart": "2026-07-21",
