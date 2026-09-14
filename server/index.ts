@@ -13,6 +13,17 @@ import {
   saveQaItem,
 } from "./jira.ts";
 import { mergeState, readState, writeState } from "./state.ts";
+import {
+  DEMO_BASE_URL,
+  DEMO_JQL,
+  demoDeleteQaItem,
+  demoHealth,
+  demoPull,
+  demoPush,
+  demoSaveQaItem,
+  demoTransitions,
+  isDemo,
+} from "./demo.ts";
 import type { LocalState, PushItem, QaItem } from "../src/lib/types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +35,10 @@ const PORT = Number(process.env.PORT || 8787);
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", async (_req, res) => {
+  if (isDemo()) {
+    res.json(demoHealth());
+    return;
+  }
   const h = await healthCheck();
   res.status(h.ok ? 200 : 503).json(h);
 });
@@ -31,8 +46,8 @@ app.get("/api/health", async (_req, res) => {
 app.get("/api/config", (_req, res) => {
   const state = readState();
   res.json({
-    jql: state.jql || process.env.JIRA_JQL || "",
-    baseUrl: process.env.JIRA_BASE_URL || "",
+    jql: state.jql || (isDemo() ? DEMO_JQL : process.env.JIRA_JQL || ""),
+    baseUrl: isDemo() ? DEMO_BASE_URL : process.env.JIRA_BASE_URL || "",
     prefsFile: "preferences.json",
     preferences: state,
   });
@@ -97,10 +112,16 @@ app.get("/api/pull", async (req, res) => {
     const jql =
       (typeof req.query.jql === "string" && req.query.jql.trim()) ||
       readState().jql ||
-      process.env.JIRA_JQL ||
+      (isDemo() ? DEMO_JQL : process.env.JIRA_JQL) ||
       "";
     if (!jql) {
       res.status(400).json({ error: "Missing JQL. Set JIRA_JQL in .env or pass ?jql=" });
+      return;
+    }
+    if (isDemo()) {
+      const pulled = demoPull(jql, readState());
+      mergeState({ resources: pulled.resources, allocations: pulled.allocations, jql });
+      res.json(pulled.model);
       return;
     }
     mergeState({ jql });
@@ -119,7 +140,7 @@ app.post("/api/push", async (req, res) => {
       res.status(400).json({ error: "body.items required" });
       return;
     }
-    const results = await pushToJira(items);
+    const results = isDemo() ? demoPush(items) : await pushToJira(items);
     res.json({ results });
   } catch (err) {
     console.error("push failed", err);
@@ -134,7 +155,7 @@ app.get("/api/transitions/:key", async (req, res) => {
       res.status(400).json({ error: "issue key required" });
       return;
     }
-    const transitions = await getTransitions(key);
+    const transitions = isDemo() ? demoTransitions() : await getTransitions(key);
     res.json({ key, transitions });
   } catch (err) {
     console.error("transitions failed", err);
@@ -147,6 +168,13 @@ app.post("/api/changelogs", async (req, res) => {
     const keys = (req.body?.keys || []) as string[];
     if (!Array.isArray(keys) || !keys.length) {
       res.status(400).json({ error: "body.keys required" });
+      return;
+    }
+    if (isDemo()) {
+      res.json({
+        changelogs: [],
+        fieldMap: { startDate: "customfield_10907", storyPoints: "customfield_10008" },
+      });
       return;
     }
     res.json(await fetchChangelogs(keys));
@@ -164,7 +192,8 @@ app.put("/api/qa", async (req, res) => {
       return;
     }
     const previousLinkedKeys = (req.body?.previousLinkedKeys || []) as string[];
-    await saveQaItem(item, previousLinkedKeys);
+    if (isDemo()) demoSaveQaItem(item);
+    else await saveQaItem(item, previousLinkedKeys);
     res.json({ ok: true });
   } catch (err) {
     console.error("qa save failed", err);
@@ -180,7 +209,8 @@ app.delete("/api/qa", async (req, res) => {
       res.status(400).json({ error: "body.itemId required" });
       return;
     }
-    await deleteQaItem(itemId, linkedIssueKeys);
+    if (isDemo()) demoDeleteQaItem(itemId);
+    else await deleteQaItem(itemId, linkedIssueKeys);
     res.json({ ok: true });
   } catch (err) {
     console.error("qa delete failed", err);
@@ -199,4 +229,7 @@ app.get("*", (req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Gantt Manager · API http://localhost:${PORT}`);
+  if (isDemo()) {
+    console.log("Demo mode — fake Jira data, preferences.demo.json, no real Jira calls");
+  }
 });

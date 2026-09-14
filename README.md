@@ -88,6 +88,13 @@ npm start
 
 Then open http://localhost:8787.
 
+## Demo mode
+
+`npm run demo` serves a fake "Nimbus" project for screenshots and walkthroughs: made-up
+issue keys, people and dates, with Pull/Push/status changes all handled in memory. It runs
+on ports 8788/5174 so it can sit next to a normal `npm run dev`, and it keeps its own
+`preferences.demo.json` / `gantt-cache.demo.json` so real prefs and saved JQLs stay private.
+
 ## Usage
 
 1. Enter JQL (or use the default), e.g.
@@ -187,6 +194,7 @@ gantt-cache.json  Session snapshot (ignored)
 | Command | Description |
 |---------|-------------|
 | `npm run dev` | API + Vite together |
+| `npm run demo` | Demo board on fake Jira data — no credentials, no Jira calls |
 | `npm run build` | Typecheck + production UI build |
 | `npm start` | Serve API + built UI |
 | `npm run preview` | Vite preview of the built UI |
