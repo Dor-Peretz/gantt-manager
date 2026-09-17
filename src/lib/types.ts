@@ -47,6 +47,8 @@ export interface GanttTask {
   localOnly?: boolean;
   /** Draft task created in the app — Push will create it in Jira under createEpicId. */
   pendingCreate?: boolean;
+  /** Plan-mode row — persisted on the host draft ticket, not a real Jira issue yet. */
+  planOnly?: boolean;
   /** Epic key to parent under when pendingCreate is true */
   createEpicId?: string;
   /** True when start/duration differ from last pull and need Push */
@@ -84,14 +86,30 @@ export interface LocalMarker {
   title: string;
   /** Date shown on the timeline (YYYY-MM-DD) */
   start: string;
+  /** Jira epic keys this local milestone is associated with. */
+  linkedEpicKeys?: string[];
   /** @deprecated Was used when markers lived under epics; ignored now. */
   epicId?: string;
 }
 
-/** User-defined non-working day (always applies, independent of IL holidays toggle). */
+/** User-defined non-working day (always applies, independent of holiday toggles). */
 export interface CustomNonWorkingDay {
   date: string;
   name?: string;
+}
+
+export type SprintState = "active" | "closed" | "future";
+
+/** Jira sprint window, shown as a read-only band above the day header. */
+export interface Sprint {
+  id: string;
+  name: string;
+  state: SprintState;
+  /** First day of the sprint (YYYY-MM-DD); null when Jira has no start date. */
+  start: string | null;
+  /** Last day of the sprint (YYYY-MM-DD); null when Jira has no end date. */
+  end: string | null;
+  boardId?: number | null;
 }
 
 export type QaKind = "integration" | "e2e";
@@ -111,6 +129,88 @@ export interface QaItem {
 export const QA_PROPERTY_KEY = "gantt.qa";
 /** Previous property key — still read so existing rows keep loading. */
 export const QA_PROPERTY_KEY_LEGACY = "sunbit.gantt.qa";
+
+/** Jira issue property storing a serialized Gantt plan (may be chunked). */
+export const PLAN_PROPERTY_KEY = "sunbit.gantt.plan";
+export const PLAN_PROPERTY_CHUNK_PREFIX = "sunbit.gantt.plan.chunk";
+
+export type PlanPublishState = "draft" | "published";
+
+/** Task row inside a plan — not a real Jira issue until published. */
+export interface PlanTask {
+  id: string;
+  title: string;
+  friendlyId: string;
+  start: string | null;
+  due: string | null;
+  durationDays: number;
+  estDays: number | null;
+  assigneeAccountId: string | null;
+  assigneeName: string | null;
+  status: string;
+  blockedBy: string[];
+}
+
+/** Epic row inside a plan — not a real Jira epic until published. */
+export interface PlanEpic {
+  id: string;
+  title: string;
+  color: string;
+  collapsed: boolean;
+  tasks: PlanTask[];
+  /** Jira epic key after successful publish */
+  publishedKey?: string;
+}
+
+/** Full plan persisted on a single Jira draft ticket. */
+export interface JiraPlan {
+  v: 1;
+  draftTicketKey: string;
+  revision: number;
+  updatedAt: string;
+  updatedBy?: string;
+  publishState: PlanPublishState;
+  publishedAt?: string;
+  projectStart: string;
+  showHolidays: boolean;
+  showPolishHolidays?: boolean;
+  /** JS weekday numbers (0=Sun … 6=Sat). Default Sun–Thu. */
+  workingWeekdays?: number[];
+  epics: PlanEpic[];
+  /** plan item id → created Jira key (epics + tasks) */
+  publishedKeys?: Record<string, string>;
+}
+
+export interface PlanValidateResult {
+  ok: boolean;
+  key?: string;
+  summary?: string;
+  error?: string;
+}
+
+export interface PlanLoadResult {
+  plan: JiraPlan;
+  created: boolean;
+}
+
+export interface PlanSaveResult {
+  plan: JiraPlan;
+}
+
+export interface PlanPublishItemResult {
+  planId: string;
+  kind: "epic" | "task";
+  title: string;
+  status: "ok" | "error" | "skipped";
+  jiraKey?: string;
+  message?: string;
+}
+
+export interface PlanPublishResult {
+  plan: JiraPlan;
+  results: PlanPublishItemResult[];
+  allOk: boolean;
+}
 
 export const QA_COLORS: Record<QaKind, string> = {
   integration: "#0d9488",
@@ -146,8 +246,12 @@ export interface Milestone {
   tasks: GanttTask[];
   /** Local-only milestone row (red star) — not a Jira epic, never synced. */
   localOnly?: boolean;
+  /** Jira epic keys linked to a local milestone. */
+  linkedEpicKeys?: string[];
   /** QA item row (integration / e2e) — synced via Jira issue properties on linked tasks. */
   qaKind?: QaKind;
+  /** Plan-mode epic — persisted on the host draft ticket, not a real Jira epic yet. */
+  planOnly?: boolean;
 }
 
 /**
@@ -198,12 +302,20 @@ export interface GanttModel {
   resourcesDockCollapsed: boolean;
   hoursPerDay: number;
   showHolidays: boolean;
+  /** When true, Polish public holidays are non-working. */
+  showPolishHolidays: boolean;
+  /** Working weekdays (0=Sun … 6=Sat). Default Sun–Thu. */
+  workingWeekdays: number[];
   showDeps: boolean;
+  /** When true, Jira sprint bands show above the day header. */
+  showSprints: boolean;
   /** Manual off days — always skip in schedule/resource math. */
   customNonWorkingDays: CustomNonWorkingDay[];
   jql: string;
   resources: Resource[];
   milestones: Milestone[];
+  /** Sprints seen on the pulled issues — read-only, refreshed on every Pull. */
+  sprints?: Sprint[];
   pulledAt: string | null;
   /** When true, the bottom Hidden folder is collapsed (default). */
   hiddenFolderCollapsed?: boolean;
@@ -242,7 +354,10 @@ export interface LocalState {
   pendingQaDeletes: PendingQaDelete[];
   projectStart: string;
   showHolidays: boolean;
+  showPolishHolidays: boolean;
+  workingWeekdays: number[];
   showDeps: boolean;
+  showSprints: boolean;
   customNonWorkingDays: CustomNonWorkingDay[];
   dayWidthPx: number;
   leftPanelWidth: number;
@@ -256,6 +371,8 @@ export interface LocalState {
   activeSavedJqlId: string | null;
   milestoneColors: Record<string, string>;
   theme: ThemeMode;
+  /** Last Jira draft ticket used for Plan mode (per viewer). */
+  planDraftTicketKey?: string | null;
 }
 
 /** Compact Jira changelog item for schedule rewind. */
@@ -375,11 +492,15 @@ export function emptyModel(jql = ""): GanttModel {
     resourcesDockCollapsed: false,
     hoursPerDay: 8,
     showHolidays: true,
+    showPolishHolidays: false,
+    workingWeekdays: [0, 1, 2, 3, 4],
     showDeps: false,
+    showSprints: true,
     customNonWorkingDays: [],
     jql,
     resources: [],
     milestones: [],
+    sprints: [],
     pulledAt: null,
     hiddenFolderCollapsed: true,
   };

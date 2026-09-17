@@ -1,5 +1,5 @@
 import type { GanttModel } from "../lib/types";
-import { isNonWorking, parseYmd, taskEnd } from "../lib/workdays";
+import { isNonWorking, parseYmd, taskEnd, workCalendarFrom } from "../lib/workdays";
 import { ResourceAvatar } from "./ResourceAvatar";
 import type { DayCol } from "./timeline";
 
@@ -13,19 +13,19 @@ function hoursForResource(
   model: GanttModel,
   resourceId: string,
   ymd: string,
-  holidaysOn: boolean,
   hoursPerDay: number,
 ): number {
+  const cal = workCalendarFrom(model);
   let hours = 0;
   const day = parseYmd(ymd);
-  if (isNonWorking(day, holidaysOn)) return 0;
+  if (isNonWorking(day, cal)) return 0;
   for (const m of model.milestones) {
     for (const t of m.tasks) {
       if (t.qaKind) continue;
       if (!t.start || !t.resourceIds.includes(resourceId)) continue;
-      const end = taskEnd(t.start, t.durationDays, holidaysOn);
+      const end = taskEnd(t.start, t.durationDays, cal);
       const s = parseYmd(t.start);
-      if (day >= s && day <= end && !isNonWorking(day, holidaysOn)) {
+      if (day >= s && day <= end && !isNonWorking(day, cal)) {
         hours += hoursPerDay;
       }
     }
@@ -34,7 +34,6 @@ function hoursForResource(
 }
 
 export function ResourcesPane({ model, days, dayWidth }: Props) {
-  const holidaysOn = model.showHolidays;
   const trackW = days.length * dayWidth;
 
   return (
@@ -68,7 +67,7 @@ export function ResourcesPane({ model, days, dayWidth }: Props) {
             </div>
             <div className="pg-track" style={{ width: trackW }}>
               {days.map((d, i) => {
-                const h = hoursForResource(model, r.id, d.ymd, holidaysOn, model.hoursPerDay);
+                const h = hoursForResource(model, r.id, d.ymd, model.hoursPerDay);
                 const off = d.isWeekend || d.isHoliday;
                 let cls = "pg-hours-cell";
                 if (off) cls += " off";

@@ -35,6 +35,7 @@ export function localMarkerToMilestone(m: LocalMarker): Milestone {
     color: "#ef4444",
     collapsed: true,
     localOnly: true,
+    linkedEpicKeys: [...(m.linkedEpicKeys || [])],
     // Self-task (same id) → rendered on the milestone row as a red star.
     tasks: [localMarkerToTask(m)],
   };
@@ -51,7 +52,12 @@ export function collectLocalMarkers(model: GanttModel): LocalMarker[] {
       const start = t?.start || t?.due;
       if (!start || seen.has(epic.id)) continue;
       seen.add(epic.id);
-      out.push({ id: epic.id, title: epic.title || t.title, start });
+      out.push({
+        id: epic.id,
+        title: epic.title || t.title,
+        start,
+        linkedEpicKeys: [...(epic.linkedEpicKeys || [])],
+      });
       continue;
     }
     // Migrate any legacy markers that were nested under epics.
@@ -60,7 +66,12 @@ export function collectLocalMarkers(model: GanttModel): LocalMarker[] {
       const start = t.start || t.due;
       if (!start) continue;
       seen.add(t.id);
-      out.push({ id: t.id, title: t.title, start });
+      out.push({
+        id: t.id,
+        title: t.title,
+        start,
+        linkedEpicKeys: epic.id ? [epic.id] : [],
+      });
     }
   }
   return out;

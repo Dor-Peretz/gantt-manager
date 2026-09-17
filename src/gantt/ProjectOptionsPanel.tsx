@@ -1,16 +1,25 @@
 import { useEffect, useState } from "react";
 import type { CustomNonWorkingDay } from "../lib/types";
+import { DEFAULT_WORKING_WEEKDAYS, WEEKDAY_SHORT } from "../lib/workdays";
 
 interface Props {
   open: boolean;
   projectStart: string;
   showHolidays: boolean;
+  showPolishHolidays: boolean;
+  workingWeekdays: number[];
   showDeps: boolean;
+  showSprints: boolean;
+  /** Sprints only exist after a Pull — the toggle explains itself when there are none. */
+  sprintCount: number;
   customNonWorkingDays: CustomNonWorkingDay[];
   onClose: () => void;
   onProjectStartChange: (value: string) => void;
   onShowHolidaysChange: (value: boolean) => void;
+  onShowPolishHolidaysChange: (value: boolean) => void;
+  onWorkingWeekdaysChange: (value: number[]) => void;
   onShowDepsChange: (value: boolean) => void;
+  onShowSprintsChange: (value: boolean) => void;
   onAddOffDay: (date: string, name?: string) => void;
   onRemoveOffDay: (date: string) => void;
 }
@@ -19,17 +28,25 @@ export function ProjectOptionsPanel({
   open,
   projectStart,
   showHolidays,
+  showPolishHolidays,
+  workingWeekdays,
   showDeps,
+  showSprints,
+  sprintCount,
   customNonWorkingDays,
   onClose,
   onProjectStartChange,
   onShowHolidaysChange,
+  onShowPolishHolidaysChange,
+  onWorkingWeekdaysChange,
   onShowDepsChange,
+  onShowSprintsChange,
   onAddOffDay,
   onRemoveOffDay,
 }: Props) {
   const [offDayDate, setOffDayDate] = useState("");
   const [offDayName, setOffDayName] = useState("");
+  const selected = new Set(workingWeekdays.length ? workingWeekdays : DEFAULT_WORKING_WEEKDAYS);
 
   useEffect(() => {
     if (!open) return;
@@ -56,6 +73,17 @@ export function ProjectOptionsPanel({
     setOffDayName("");
   }
 
+  function toggleWeekday(day: number) {
+    const next = new Set(selected);
+    if (next.has(day)) {
+      if (next.size <= 1) return;
+      next.delete(day);
+    } else {
+      next.add(day);
+    }
+    onWorkingWeekdaysChange([...next].sort((a, b) => a - b));
+  }
+
   return (
     <div className="pg-modal-backdrop" onMouseDown={onClose}>
       <div
@@ -79,6 +107,28 @@ export function ProjectOptionsPanel({
         </label>
 
         <div className="pg-options-section">
+          <div className="pg-options-section-title">Working days</div>
+          <p className="pg-options-hint">Default is Sunday–Thursday. Duration skips unselected days.</p>
+          <div className="pg-weekday-picks" role="group" aria-label="Working days">
+            {WEEKDAY_SHORT.map((label, day) => {
+              const on = selected.has(day);
+              return (
+                <button
+                  key={label + day}
+                  type="button"
+                  className={`pg-weekday-pick${on ? " on" : ""}`}
+                  aria-pressed={on}
+                  onClick={() => toggleWeekday(day)}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="pg-options-section">
+          <div className="pg-options-section-title">Holidays</div>
           <label className="pg-modal-check" title="Israeli public holidays (0 hours when on)">
             <input
               type="checkbox"
@@ -86,6 +136,14 @@ export function ProjectOptionsPanel({
               onChange={(e) => onShowHolidaysChange(e.target.checked)}
             />
             <span>IL holidays</span>
+          </label>
+          <label className="pg-modal-check" title="Polish public holidays (0 hours when on)">
+            <input
+              type="checkbox"
+              checked={showPolishHolidays}
+              onChange={(e) => onShowPolishHolidaysChange(e.target.checked)}
+            />
+            <span>PL holidays</span>
           </label>
           <label
             className="pg-modal-check"
@@ -97,6 +155,21 @@ export function ProjectOptionsPanel({
               onChange={(e) => onShowDepsChange(e.target.checked)}
             />
             <span>Prerequisites</span>
+          </label>
+          <label
+            className="pg-modal-check"
+            title={
+              sprintCount
+                ? `Jira sprint bands above the dates (${sprintCount} sprint${sprintCount === 1 ? "" : "s"} on the pulled issues)`
+                : "Jira sprint bands above the dates — none on the pulled issues yet"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={showSprints}
+              onChange={(e) => onShowSprintsChange(e.target.checked)}
+            />
+            <span>Sprints{sprintCount ? ` (${sprintCount})` : ""}</span>
           </label>
         </div>
 

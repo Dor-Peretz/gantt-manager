@@ -7,7 +7,7 @@ import type {
   QaKind,
 } from "./types";
 import { QA_COLORS } from "./types";
-import { dueFromStartDuration } from "./workdays";
+import { dueFromStartDuration, workCalendarFrom, type WorkCalendar } from "./workdays";
 
 export function newQaItemId(): string {
   return `qa-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -79,7 +79,7 @@ export function deriveAssigneesFromLinked(
 export function qaItemToTask(
   item: QaItem,
   model: GanttModel,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
   opts?: {
     dirty?: boolean;
     pulledLinkedIssueKeys?: string[];
@@ -89,7 +89,7 @@ export function qaItemToTask(
   },
 ): GanttTask {
   const durationDays = Math.max(1, item.durationDays || 1);
-  const due = dueFromStartDuration(item.start, durationDays, holidaysOn);
+  const due = dueFromStartDuration(item.start, durationDays, cal);
   const { resourceIds, assignee } = deriveAssigneesFromLinked(model, item.linkedIssueKeys);
   const dirty = opts?.dirty ?? false;
   const pulledLinkedIssueKeys =
@@ -128,7 +128,7 @@ export function qaItemToTask(
 export function qaItemToMilestone(
   item: QaItem,
   model: GanttModel,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
   opts?: {
     dirty?: boolean;
     pulledLinkedIssueKeys?: string[];
@@ -144,7 +144,7 @@ export function qaItemToMilestone(
     collapsed: true,
     localOnly: true,
     qaKind: item.kind,
-    tasks: [qaItemToTask(item, model, holidaysOn, opts)],
+    tasks: [qaItemToTask(item, model, cal, opts)],
   };
 }
 
@@ -264,7 +264,7 @@ export function injectQaItems(
   items: QaItem[],
   orderHint?: string[],
 ): GanttModel {
-  const holidaysOn = model.showHolidays !== false;
+  const cal = workCalendarFrom(model);
   const jiraEpics = model.milestones.filter((m) => !m.localOnly);
   const localMarkers = model.milestones.filter((m) => isLocalMilestoneRow(m));
 
@@ -272,7 +272,7 @@ export function injectQaItems(
     return { ...model, milestones: [...localMarkers, ...jiraEpics] };
   }
 
-  const qaRows = items.map((item) => qaItemToMilestone(item, model, holidaysOn));
+  const qaRows = items.map((item) => qaItemToMilestone(item, model, cal));
   const byId = new Map<string, Milestone>();
   for (const m of [...localMarkers, ...jiraEpics, ...qaRows]) byId.set(m.id, m);
 
@@ -329,7 +329,7 @@ export function revertUnpushedQa(
   model: GanttModel,
   pendingDeletes: PendingQaDelete[],
 ): GanttModel {
-  const holidaysOn = model.showHolidays !== false;
+  const cal = workCalendarFrom(model);
   const kept: Milestone[] = [];
   for (const m of model.milestones) {
     if (!isQaMilestone(m)) {
@@ -355,7 +355,7 @@ export function revertUnpushedQa(
           linkedIssueKeys: [...t.pulledLinkedIssueKeys],
         },
         model,
-        holidaysOn,
+        cal,
       ),
     );
   }

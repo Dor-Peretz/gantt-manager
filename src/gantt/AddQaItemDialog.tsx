@@ -15,6 +15,7 @@ interface Props {
   tasks: BoardTaskOption[];
   editing?: QaItem | null;
   onClose: () => void;
+  onDelete?: (itemId: string) => void;
   onSave: (input: {
     id?: string;
     kind: QaKind;
@@ -32,6 +33,7 @@ export function AddQaItemDialog({
   tasks,
   editing = null,
   onClose,
+  onDelete,
   onSave,
 }: Props) {
   const [title, setTitle] = useState("");
@@ -155,6 +157,18 @@ export function AddQaItemDialog({
           )}
         </div>
         <div className="pg-modal-actions">
+          {editing && onDelete ? (
+            <button
+              type="button"
+              className="gantt-btn danger pg-modal-delete"
+              onClick={() => {
+                onDelete(editing.id);
+                onClose();
+              }}
+            >
+              Delete {kindLabel}
+            </button>
+          ) : null}
           <button type="button" className="gantt-btn" onClick={onClose}>
             Cancel
           </button>

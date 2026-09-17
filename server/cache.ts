@@ -2,9 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GanttModel } from "../src/lib/types.ts";
+import { isDemo } from "./demo.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CACHE_PATH = path.resolve(__dirname, "..", "gantt-cache.json");
+const CACHE_PATH = path.resolve(
+  __dirname,
+  "..",
+  isDemo() ? "gantt-cache.demo.json" : "gantt-cache.json",
+);
 
 export interface ScrollState {
   tasksLeft: number;

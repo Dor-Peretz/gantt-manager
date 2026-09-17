@@ -3,14 +3,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LocalState } from "../src/lib/types.ts";
 import { normalizeState } from "../src/domain/stateDefaults.ts";
+import { demoPreferences, isDemo } from "./demo.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const PREFS_PATH = path.resolve(ROOT, "preferences.json");
+const PREFS_PATH = path.resolve(ROOT, isDemo() ? "preferences.demo.json" : "preferences.json");
 const LEGACY_PATH = path.resolve(ROOT, "gantt-state.json");
 
 function migrateLegacyIfNeeded(): void {
-  if (fs.existsSync(PREFS_PATH) || !fs.existsSync(LEGACY_PATH)) return;
+  if (isDemo() || fs.existsSync(PREFS_PATH) || !fs.existsSync(LEGACY_PATH)) return;
   try {
     fs.renameSync(LEGACY_PATH, PREFS_PATH);
     console.log("Migrated gantt-state.json → preferences.json");
@@ -37,6 +38,7 @@ export function readState(): LocalState {
   migrateLegacyIfNeeded();
   try {
     if (!fs.existsSync(PREFS_PATH)) {
+      if (isDemo()) return normalize(demoPreferences());
       return normalize({ jql: process.env.JIRA_JQL || "" });
     }
     const raw = JSON.parse(fs.readFileSync(PREFS_PATH, "utf8")) as Partial<LocalState>;

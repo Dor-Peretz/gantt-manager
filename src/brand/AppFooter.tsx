@@ -38,9 +38,23 @@ function HeartIcon({ className = "" }: { className?: string }) {
   );
 }
 
-export function AppFooter() {
+interface Props {
+  onOpenGuide: () => void;
+}
+
+export function AppFooter({ onOpenGuide }: Props) {
   return (
     <footer className="app-footer">
+      <button
+        type="button"
+        className="app-footer-guide"
+        onClick={onOpenGuide}
+        title="Open the Gantt Manager feature guide"
+      >
+        <span aria-hidden>?</span>
+        App guide
+      </button>
+      <span className="app-footer-sep" aria-hidden="true" />
       <a
         className="app-footer-quote"
         href={GITHUB_ISSUES_URL}

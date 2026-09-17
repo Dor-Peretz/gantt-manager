@@ -4,7 +4,9 @@ dist/
 .env.*
 !.env.example
 preferences.json
+preferences.demo.json
 gantt-cache.json
+gantt-cache.demo.json
 gantt-state.json
 *.log
 .DS_Store
