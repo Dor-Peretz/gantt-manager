@@ -7,7 +7,8 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import type { ScrollState } from "../api";
+import { createPortal } from "react-dom";
+import type { ScrollState } from "../store/GanttStore";
 import type { GanttModel, GanttTask, HistoricalSchedule, HistoryViewMode } from "../lib/types";
 import { isLocalMilestoneRow, isQaMilestone, qaKindIcon, qaKindLabel } from "../lib/qaItems";
 import { historicalScheduleDiffers } from "../lib/jiraHistory";
@@ -22,9 +23,12 @@ import {
   formatYmd,
   parseYmd,
   todayLocal,
+  workCalendarFrom,
+  type WorkCalendar,
 } from "../lib/workdays";
 import { AddTimelineMenu, type DeletableTimelineItem } from "./AddTimelineMenu";
 import { AssignMenu } from "./AssignMenu";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { EpicColorPicker } from "./EpicColorPicker";
 import { ResourceAvatar } from "./ResourceAvatar";
 import { ResourcesPane } from "./ResourcesPane";
@@ -34,15 +38,20 @@ import {
   DAY_WIDTH_MIN,
   DAY_WIDTH_STEP,
   ROW_H,
+  SPRINT_LANE_H,
   barGeometry,
   buildDays,
+  buildHolidaySpans,
   buildRows,
+  buildSprintBands,
   clampDayWidth,
+  headHeight,
   isEpicSelfTask,
   markerLeft,
   milestoneSpan,
   projectEndYmd,
   rangeBounds,
+  sprintLaneCount,
   todayYmd,
 } from "./timeline";
 import { useDragResize } from "./useDragResize";
@@ -233,15 +242,30 @@ function historyGhostForTask(
   historyOverlay: Map<string, HistoricalSchedule | null> | undefined,
   compareDate: string | null | undefined,
   days: ReturnType<typeof buildDays>,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
   dayWidth: number,
 ): { geo: { left: number; width: number }; title: string } | null {
   if (!historyOverlay || !compareDate || task.localOnly || task.pendingCreate) return null;
   const hist = historyOverlay.get(task.id);
   if (!hist || !historicalScheduleDiffers(hist, task) || !hist.start) return null;
-  const geo = barGeometry(days, hist.start, hist.durationDays, holidaysOn, dayWidth);
+  const geo = barGeometry(days, hist.start, hist.durationDays, cal, dayWidth);
   if (!geo) return null;
   return { geo, title: historyGhostTitle(compareDate, hist, task) };
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="pg-trash-icon" aria-hidden focusable="false">
+      <path
+        d="M9 3h6m-9 3h12M6 6l1 14h10l1-14M10 10v7m4-7v7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function ColumnResizeHandle({
@@ -275,7 +299,11 @@ function ColumnResizeHandle({
 interface Props {
   model: GanttModel;
   jiraBaseUrl: string;
+  /** Items from the standard board that remain removable while Plan mode is open. */
+  additionalDeletableItems?: DeletableTimelineItem[];
   initialScroll?: ScrollState | null;
+  /** Message shown when a derived view (such as filters) has no rows. */
+  emptyMessage?: ReactNode;
   /** Screenshot-ready: hide editors, resize chrome, and resources dock. */
   preview?: boolean;
   /** Show loading overlay while syncing with Jira. */
@@ -312,6 +340,7 @@ interface Props {
   onToggleMarker: (taskId: string) => void;
   onToggleHidden: (taskId: string) => void;
   onToggleHiddenFolder: () => void;
+  onEditLocalMilestone: (milestoneId: string) => void;
   onDeleteLocalMilestone: (taskId: string) => void;
   onDeleteQaItem: (milestoneId: string) => void;
   onEditQaItem: (milestoneId: string) => void;
@@ -322,7 +351,16 @@ interface Props {
   onAddMilestone?: () => void;
   onAddIntegrationTest?: () => void;
   onAddE2eFlow?: () => void;
+  onAddEpic?: () => void;
+  onEditEpic?: (milestoneId: string) => void;
+  onDeletePlanEpic?: (milestoneId: string) => void;
+  planMode?: boolean;
   onCollapseOrExpandAll?: () => void;
+  /**
+   * Collapse state of the unfiltered board. Filtering force-expands the rows it shows,
+   * so the button label has to come from the model the action actually writes to.
+   */
+  allEpicsCollapsed?: boolean;
 }
 
 type DragMode =
@@ -347,7 +385,9 @@ type DragMode =
 export function GanttBoard({
   model,
   jiraBaseUrl,
+  additionalDeletableItems = [],
   initialScroll,
+  emptyMessage,
   preview = false,
   loading = null,
   loadingDetail = null,
@@ -366,6 +406,7 @@ export function GanttBoard({
   onToggleMarker,
   onToggleHidden,
   onToggleHiddenFolder,
+  onEditLocalMilestone,
   onDeleteLocalMilestone,
   onDeleteQaItem,
   onEditQaItem,
@@ -376,10 +417,17 @@ export function GanttBoard({
   onAddMilestone,
   onAddIntegrationTest,
   onAddE2eFlow,
+  onAddEpic,
+  onEditEpic,
+  onDeletePlanEpic,
+  planMode = false,
   onCollapseOrExpandAll,
+  allEpicsCollapsed: allEpicsCollapsedProp,
 }: Props) {
   const readOnly = preview || historyReadOnly;
-  const hasEpics = model.milestones.some((m) => !m.localOnly);
+  const hasEpics = planMode
+    ? model.milestones.some((m) => m.planOnly)
+    : model.milestones.some((m) => !m.localOnly);
   const hasBoardTasks = useMemo(() => {
     for (const m of model.milestones) {
       if (m.localOnly) continue;
@@ -390,8 +438,28 @@ export function GanttBoard({
     return false;
   }, [model.milestones]);
   const deletableItems = useMemo((): DeletableTimelineItem[] => {
-    const out: DeletableTimelineItem[] = [];
+    const out: DeletableTimelineItem[] = [...additionalDeletableItems];
     for (const m of model.milestones) {
+      if (planMode && m.planOnly) {
+        out.push({
+          id: m.id,
+          label: m.title,
+          kind: "plan-epic",
+          confirmMessage: `Remove planned epic “${m.title}” and its tasks?`,
+          onDelete: () => onDeletePlanEpic?.(m.id),
+        });
+        for (const t of m.tasks) {
+          if (!t.planOnly) continue;
+          out.push({
+            id: t.id,
+            label: t.title,
+            kind: "draft",
+            confirmMessage: `Remove planned task “${t.title}”?`,
+            onDelete: () => onDeleteDraftTask(t.id),
+          });
+        }
+        continue;
+      }
       if (isLocalMilestoneRow(m)) {
         out.push({
           id: m.id,
@@ -429,14 +497,31 @@ export function GanttBoard({
     }
     return out;
   }, [
+    additionalDeletableItems,
     model.milestones,
     onDeleteDraftTask,
     onDeleteLocalMilestone,
+    onDeletePlanEpic,
     onDeleteQaItem,
+    planMode,
   ]);
   const allEpicsCollapsed =
-    model.milestones.length > 0 && model.milestones.every((m) => m.collapsed);
-  const holidaysOn = model.showHolidays;
+    allEpicsCollapsedProp ??
+    (model.milestones.length > 0 && model.milestones.every((m) => m.collapsed));
+  const {
+    showHolidays: calShowHolidays,
+    showPolishHolidays: calShowPolishHolidays,
+    workingWeekdays: calWorkingWeekdays,
+  } = model;
+  const cal = useMemo(
+    () =>
+      workCalendarFrom({
+        showHolidays: calShowHolidays,
+        showPolishHolidays: calShowPolishHolidays,
+        workingWeekdays: calWorkingWeekdays,
+      }),
+    [calShowHolidays, calShowPolishHolidays, calWorkingWeekdays],
+  );
   const dayWidth = model.dayWidthPx || 28;
   const leftW = model.leftPanelWidth || 680;
   const resDockH = model.resourcesDockHeight || 220;
@@ -531,21 +616,28 @@ export function GanttBoard({
   }
 
   const { start, end } = useMemo(
-    () => rangeBounds(model.milestones, model.projectStart, holidaysOn),
-    [model.milestones, model.projectStart, holidaysOn],
+    () => rangeBounds(model.milestones, model.projectStart, cal),
+    [model.milestones, model.projectStart, cal],
   );
-  const days = useMemo(() => buildDays(start, end, holidaysOn), [start, end, holidaysOn]);
+  const days = useMemo(() => buildDays(start, end, cal), [start, end, cal]);
+  const holidaySpans = useMemo(() => buildHolidaySpans(days), [days]);
+  const sprintBands = useMemo(
+    () => (model.showSprints === false ? [] : buildSprintBands(days, model.sprints || [])),
+    [days, model.showSprints, model.sprints],
+  );
+  const sprintLanes = sprintLaneCount(sprintBands);
+  const headH = headHeight(sprintLanes);
   const rows = useMemo(
-    () => buildRows(model.milestones, model.hiddenFolderCollapsed !== false),
-    [model.milestones, model.hiddenFolderCollapsed],
+    () => buildRows(model.milestones, model.hiddenFolderCollapsed !== false, headH),
+    [model.milestones, model.hiddenFolderCollapsed, headH],
   );
   const trackW = days.length * dayWidth;
-  const canvasH = 52 + rows.length * ROW_H;
+  const canvasH = 52 + sprintLanes * SPRINT_LANE_H + rows.length * ROW_H;
 
   const today = todayYmd();
   const todayLeft = markerLeft(days, today, dayWidth);
   const projStartLeft = markerLeft(days, model.projectStart, dayWidth);
-  const projEnd = projectEndYmd(model.milestones, holidaysOn);
+  const projEnd = projectEndYmd(model.milestones, cal);
   const projEndLeft = projEnd ? markerLeft(days, projEnd, dayWidth) : null;
 
   const [rowDrag, setRowDrag] = useState<{ milestoneId: string; taskId: string } | null>(
@@ -563,6 +655,20 @@ export function GanttBoard({
   const [drag, setDrag] = useState<DragMode>(null);
   /** Row whose secondary info panel is open — rows stay one line tall by default. */
   const [detailsRow, setDetailsRow] = useState<string | null>(null);
+  /** Bar under the cursor — shows its prerequisites even when the arrows are off. */
+  const [hoverPrereq, setHoverPrereq] = useState<{
+    taskId: string;
+    top: number;
+    bottom: number;
+    left: number;
+  } | null>(null);
+  /** Hovered bar + task id stay in one ref so scroll remasure cannot mix identities. */
+  const hoverPrereqTargetRef = useRef<{ el: HTMLElement; taskId: string } | null>(null);
+  const [pendingPlanDelete, setPendingPlanDelete] = useState<{
+    kind: "epic" | "task";
+    id: string;
+    title: string;
+  } | null>(null);
   /** Ghost bar while placing a start date on an unscheduled task. */
   const [placeHover, setPlaceHover] = useState<{
     taskId: string;
@@ -595,22 +701,30 @@ export function GanttBoard({
     const x = e.clientX - rect.left;
     const idx = Math.floor(x / dayWidth);
     if (idx < 0 || idx >= days.length) return null;
-    return formatYmd(firstWorkingDay(parseYmd(days[idx].ymd), holidaysOn));
+    return formatYmd(firstWorkingDay(parseYmd(days[idx].ymd), cal));
   }
 
   function placeStartOnTask(task: GanttTask, start: string) {
     // Keep existing geometry duration; do not invent a Story Points estimate.
     const durationDays = Math.max(1, task.durationDays || 1);
-    const due = dueFromStartDuration(start, durationDays, holidaysOn);
+    const due = dueFromStartDuration(start, durationDays, cal);
     onScheduleEdit(task.id, { start, due });
     setPlaceHover(null);
   }
+
+  function confirmPlanDelete() {
+    if (!pendingPlanDelete) return;
+    const pending = pendingPlanDelete;
+    setPendingPlanDelete(null);
+    if (pending.kind === "epic") onDeletePlanEpic?.(pending.id);
+    else onDeleteDraftTask(pending.id);
+  }
   const dragRef = useRef<DragMode>(null);
   const dayWidthRef = useRef(dayWidth);
-  const holidaysOnRef = useRef(holidaysOn);
+  const calRef = useRef(cal);
   const onScheduleEditRef = useRef(onScheduleEdit);
   dayWidthRef.current = dayWidth;
-  holidaysOnRef.current = holidaysOn;
+  calRef.current = cal;
   onScheduleEditRef.current = onScheduleEdit;
 
   const taskById = useMemo(() => {
@@ -638,7 +752,7 @@ export function GanttBoard({
       const d = dragRef.current;
       if (!d) return;
       const dw = dayWidthRef.current;
-      const hol = holidaysOnRef.current;
+      const hol = calRef.current;
       const dx = clientX - d.startX;
 
       if (d.kind === "move") {
@@ -713,12 +827,12 @@ export function GanttBoard({
       if (r.kind !== "task" || !r.task?.start) continue;
       const to = r.task;
       const toStart = to.start as string;
-      const toGeo = barGeometry(days, toStart, to.durationDays, holidaysOn, dayWidth);
+      const toGeo = barGeometry(days, toStart, to.durationDays, cal, dayWidth);
       if (!toGeo) continue;
       for (const fromKey of to.blockedBy) {
         const from = taskById.get(fromKey);
         if (!from?.start) continue;
-        const fromGeo = barGeometry(days, from.start, from.durationDays, holidaysOn, dayWidth);
+        const fromGeo = barGeometry(days, from.start, from.durationDays, cal, dayWidth);
         const y1 = rowY.get(fromKey);
         const y2 = rowY.get(to.id);
         if (!fromGeo || y1 == null || y2 == null) continue;
@@ -728,21 +842,138 @@ export function GanttBoard({
       }
     }
     return paths;
-  }, [model.showDeps, rows, days, holidaysOn, dayWidth, taskById]);
+  }, [model.showDeps, rows, days, cal, dayWidth, taskById]);
+
+  /** Arrows for the hovered bar only — drawn whether or not the arrows option is on. */
+  const hoverDepPaths = useMemo(() => {
+    const paths: Array<{ d: string; x1: number; y1: number }> = [];
+    const toId = hoverPrereq?.taskId;
+    if (!toId) return paths;
+    const to = taskById.get(toId);
+    if (!to?.start || !to.blockedBy.length) return paths;
+    const rowY = new Map<string, number>();
+    for (const r of rows) {
+      if (r.kind === "task" && r.task) rowY.set(r.task.id, r.y + ROW_H / 2);
+    }
+    const toGeo = barGeometry(days, to.start, to.durationDays, cal, dayWidth);
+    const y2 = rowY.get(to.id);
+    if (!toGeo || y2 == null) return paths;
+    for (const fromKey of to.blockedBy) {
+      const from = taskById.get(fromKey);
+      if (!from?.start) continue;
+      const fromGeo = barGeometry(days, from.start, from.durationDays, cal, dayWidth);
+      const y1 = rowY.get(fromKey);
+      if (!fromGeo || y1 == null) continue;
+      const x1 = fromGeo.left + fromGeo.width;
+      paths.push({
+        d: roundedOrthPath(depRoute(x1, y1, toGeo.left, y2)),
+        x1,
+        y1,
+      });
+    }
+    return paths;
+  }, [hoverPrereq, rows, days, cal, dayWidth, taskById]);
+
+  /** Prerequisite rows listed in the hover card, resolved against the board. */
+  const hoverPrereqItems = useMemo(() => {
+    const toId = hoverPrereq?.taskId;
+    if (!toId) return [];
+    const to = taskById.get(toId);
+    if (!to) return [];
+    return to.blockedBy.map((key) => {
+      const from = taskById.get(key);
+      return {
+        key,
+        title: from?.title || null,
+        status: from?.status || null,
+        start: from?.start || null,
+        due: from?.due || null,
+        done: from ? isDoneStatus(from.status) : false,
+        onBoard: !!from,
+      };
+    });
+  }, [hoverPrereq, taskById]);
+
+  /** Bars that block the hovered task get an outline so they stand out. */
+  const hoverPrereqKeys = useMemo(() => {
+    const toId = hoverPrereq?.taskId;
+    const to = toId ? taskById.get(toId) : null;
+    return new Set(to?.blockedBy || []);
+  }, [hoverPrereq, taskById]);
+
+  useEffect(() => {
+    if (drag) {
+      hoverPrereqTargetRef.current = null;
+      setHoverPrereq(null);
+    }
+  }, [drag]);
+
+  const hoverPrereqId = hoverPrereq?.taskId ?? null;
+  useEffect(() => {
+    if (!hoverPrereqId) return;
+    function remeasure() {
+      const target = hoverPrereqTargetRef.current;
+      if (!target || target.taskId !== hoverPrereqId) return;
+      const r = target.el.getBoundingClientRect();
+      if (
+        r.bottom < 8 ||
+        r.top > window.innerHeight - 8 ||
+        r.right < 8 ||
+        r.left > window.innerWidth - 8
+      ) {
+        hoverPrereqTargetRef.current = null;
+        setHoverPrereq(null);
+        return;
+      }
+      setHoverPrereq({
+        taskId: target.taskId,
+        top: r.top,
+        bottom: r.bottom,
+        left: r.left,
+      });
+    }
+    window.addEventListener("scroll", remeasure, true);
+    window.addEventListener("resize", remeasure);
+    return () => {
+      window.removeEventListener("scroll", remeasure, true);
+      window.removeEventListener("resize", remeasure);
+    };
+  }, [hoverPrereqId]);
 
   if (!model.milestones.length) {
     return (
       <div className="pg-shell">
         <div className="pg-empty">
-          No tasks yet. Enter a JQL (or epic keys) and press <strong>Pull</strong>.
-          <br />
-          Example: <code>project = SBT AND parent = SBT-61018</code>
+          {emptyMessage ? (
+            <p>{emptyMessage}</p>
+          ) : planMode ? (
+            <>
+              <p>No planned epics yet.</p>
+              <p className="pg-empty-sub">
+                Add an epic to start planning, then add tasks under it from the{" "}
+                <strong>+</strong> menu in the board header (or the button below).
+              </p>
+              {onAddEpic ? (
+                <button type="button" className="gantt-btn primary" onClick={onAddEpic}>
+                  Add epic
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              No tasks yet. Enter a JQL (or epic keys) and press <strong>Pull</strong>.
+              <br />
+              Example: <code>project = SBT AND parent = SBT-61018</code>
+            </>
+          )}
         </div>
       </div>
     );
   }
 
   const shellStyle = {
+    ["--head-h" as string]: `${headH}px`,
+    ["--sprint-lanes-h" as string]: `${sprintLanes * SPRINT_LANE_H}px`,
     ["--day-w" as string]: `${dayWidth}px`,
     ["--left-w" as string]: `${leftW}px`,
     ["--name-w" as string]: `${nameW}px`,
@@ -845,21 +1076,27 @@ export function GanttBoard({
                 {!preview &&
                   (onCollapseOrExpandAll ||
                     (!readOnly &&
-                      (onAddTask || onAddMilestone || onAddIntegrationTest || onAddE2eFlow))) && (
+                      (onAddTask ||
+                        onAddEpic ||
+                        onAddMilestone ||
+                        onAddIntegrationTest ||
+                        onAddE2eFlow))) && (
                   <div className="pg-board-actions">
                     {!readOnly &&
                       onAddTask &&
-                      onAddMilestone &&
-                      onAddIntegrationTest &&
-                      onAddE2eFlow && (
+                      (planMode
+                        ? onAddEpic
+                        : onAddMilestone && onAddIntegrationTest && onAddE2eFlow) && (
                       <AddTimelineMenu
                         hasEpics={hasEpics}
                         hasBoardTasks={hasBoardTasks}
                         deletableItems={deletableItems}
                         onAddTask={onAddTask}
-                        onAddMilestone={onAddMilestone}
-                        onAddIntegrationTest={onAddIntegrationTest}
-                        onAddE2eFlow={onAddE2eFlow}
+                        onAddMilestone={onAddMilestone || (() => undefined)}
+                        onAddIntegrationTest={onAddIntegrationTest || (() => undefined)}
+                        onAddE2eFlow={onAddE2eFlow || (() => undefined)}
+                        planMode={planMode}
+                        onAddEpic={onAddEpic}
                       />
                     )}
                     {onCollapseOrExpandAll && (
@@ -919,6 +1156,44 @@ export function GanttBoard({
                     </div>
                   ) : null,
                 )}
+                {holidaySpans.map((h, i) => {
+                  // Clip at the next holiday so neighbouring names never overlap.
+                  const nextIndex = holidaySpans[i + 1]?.index ?? days.length;
+                  const avail = (nextIndex - h.index) * dayWidth - 4;
+                  return (
+                    <div
+                      key={`hol-${h.ymd}`}
+                      className="pg-holiday-name"
+                      style={{
+                        left: h.index * dayWidth,
+                        maxWidth: Math.max(dayWidth * h.days, avail),
+                      }}
+                      title={h.title}
+                    >
+                      {h.label}
+                    </div>
+                  );
+                })}
+                {sprintLanes > 0 && (
+                  <div className="pg-sprint-row" aria-label="Jira sprints">
+                    {sprintBands.map((band) => (
+                      <div
+                        key={`sprint-${band.id}`}
+                        className={`pg-sprint-band ${band.state}${
+                          band.clippedStart ? " clipped-start" : ""
+                        }${band.clippedEnd ? " clipped-end" : ""}`}
+                        style={{
+                          left: band.index * dayWidth,
+                          width: band.days * dayWidth,
+                          top: band.lane * SPRINT_LANE_H,
+                        }}
+                        title={band.title}
+                      >
+                        <span className="pg-sprint-name">{band.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="pg-dow-row">
                   {days.map((d) => (
                     <div
@@ -966,7 +1241,7 @@ export function GanttBoard({
                 !isHiddenFolder && !isQaRow && !isLocalMs && childCount > 0
                   ? Math.round((doneChildCount / childCount) * 100)
                   : null;
-              const span = isHiddenFolder ? null : milestoneSpan(r.milestone, holidaysOn);
+              const span = isHiddenFolder ? null : milestoneSpan(r.milestone, cal);
               const msGeo =
                 isHiddenFolder
                   ? null
@@ -975,7 +1250,7 @@ export function GanttBoard({
                         days,
                         epicSelf.start,
                         epicSelf.durationDays,
-                        holidaysOn,
+                        cal,
                         dayWidth,
                       )
                     : !isLocalMs && epicSelf?.start
@@ -983,7 +1258,7 @@ export function GanttBoard({
                           days,
                           epicSelf.start,
                           epicSelf.durationDays,
-                          holidaysOn,
+                          cal,
                           dayWidth,
                         )
                       : !isLocalMs && !isQaRow && span
@@ -1016,12 +1291,14 @@ export function GanttBoard({
                   days,
                   placeHover.start,
                   Math.max(1, epicSelf.durationDays || 1),
-                  holidaysOn,
+                  cal,
                   dayWidth,
                 );
               const msRowKey = `ms-${r.milestone.id}`;
               const msDetailsOpen = detailsRow === msRowKey;
               const msQaKeys = (isQaRow && epicSelf?.linkedIssueKeys) || [];
+              const linkedEpicKeys =
+                (isLocalMs && r.milestone.linkedEpicKeys) || [];
               /** QA rows collect assignees from every linked Jira issue, so there can be several. */
               const qaAssignees = isQaRow
                 ? (epicSelf?.resourceIds || [])
@@ -1194,6 +1471,8 @@ export function GanttBoard({
                             </span>
                           ) : isLocalMs ? (
                             <span className="pg-local-key">MS</span>
+                          ) : r.milestone.planOnly ? (
+                            <span className="pg-local-key">EP</span>
                           ) : (
                             <a
                               href={`${jiraBaseUrl}/browse/${r.milestone.id}`}
@@ -1207,7 +1486,7 @@ export function GanttBoard({
                         </span>
                         <TaskWarnIcons task={epicSelf} />
                       </div>
-                      {msMeta || msQaKeys.length ? (
+                      {msMeta || msQaKeys.length || linkedEpicKeys.length ? (
                         <DetailsToggle
                           open={msDetailsOpen}
                           onToggle={() => setDetailsRow(msDetailsOpen ? null : msRowKey)}
@@ -1231,26 +1510,53 @@ export function GanttBoard({
                               ))}
                             </span>
                           ) : null}
+                          {linkedEpicKeys.length ? (
+                            <span className="pg-qa-chips">
+                              {linkedEpicKeys.map((key) => (
+                                <a
+                                  key={key}
+                                  className="pg-qa-chip pg-ms-epic-chip"
+                                  href={`${jiraBaseUrl}/browse/${key}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  title={`Linked Jira epic ${key}`}
+                                >
+                                  {key}
+                                </a>
+                              ))}
+                            </span>
+                          ) : null}
                           {msMeta ? <span className="pg-owner">{msMeta}</span> : null}
                         </RowDetails>
                       )}
                       {isLocalMs && !readOnly && (
-                        <button
-                          type="button"
-                          className="pg-local-delete"
-                          title="Delete milestone"
-                          aria-label="Delete milestone"
-                          onClick={() => onDeleteLocalMilestone(r.milestone.id)}
-                        >
-                          ×
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="pg-local-edit"
+                            title="Edit milestone and linked epics"
+                            aria-label="Edit milestone"
+                            onClick={() => onEditLocalMilestone(r.milestone.id)}
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            className="pg-local-delete pg-row-delete"
+                            title="Delete milestone"
+                            aria-label="Delete milestone"
+                            onClick={() => onDeleteLocalMilestone(r.milestone.id)}
+                          >
+                            <TrashIcon />
+                          </button>
+                        </>
                       )}
                       {isQaRow && !readOnly && (
                         <>
                           <button
                             type="button"
                             className="pg-local-edit"
-                            title="Edit QA item"
+                            title={`Edit ${qaKindLabel(r.milestone.qaKind || "integration")}`}
                             aria-label="Edit QA item"
                             onClick={() => onEditQaItem(r.milestone.id)}
                           >
@@ -1258,12 +1564,40 @@ export function GanttBoard({
                           </button>
                           <button
                             type="button"
-                            className="pg-local-delete"
-                            title="Delete QA item"
+                            className="pg-local-delete pg-row-delete"
+                            title={`Delete ${qaKindLabel(r.milestone.qaKind || "integration")}`}
                             aria-label="Delete QA item"
                             onClick={() => onDeleteQaItem(r.milestone.id)}
                           >
-                            ×
+                            <TrashIcon />
+                          </button>
+                        </>
+                      )}
+                      {planMode && r.milestone.planOnly && !readOnly && (
+                        <>
+                          <button
+                            type="button"
+                            className="pg-local-edit"
+                            title="Edit planned epic"
+                            aria-label="Edit planned epic"
+                            onClick={() => onEditEpic?.(r.milestone.id)}
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            className="pg-local-delete pg-plan-delete pg-row-delete"
+                            title="Delete planned epic"
+                            aria-label="Delete planned epic"
+                            onClick={() =>
+                              setPendingPlanDelete({
+                                kind: "epic",
+                                id: r.milestone.id,
+                                title: r.milestone.title,
+                              })
+                            }
+                          >
+                            <TrashIcon />
                           </button>
                         </>
                       )}
@@ -1361,7 +1695,7 @@ export function GanttBoard({
                                 ? dueFromStartDuration(
                                     startVal,
                                     epicSelf.durationDays,
-                                    holidaysOn,
+                                    cal,
                                   )
                                 : epicSelf.due;
                               onScheduleEdit(epicSelf.id, { start: startVal, due });
@@ -1392,7 +1726,7 @@ export function GanttBoard({
                                 ? dueFromStartDuration(
                                     epicSelf.start,
                                     durationDays,
-                                    holidaysOn,
+                                    cal,
                                   )
                                 : epicSelf.due;
                               onScheduleEdit(epicSelf.id, {
@@ -1503,7 +1837,7 @@ export function GanttBoard({
                           historyOverlay,
                           compareDate,
                           days,
-                          holidaysOn,
+                          cal,
                           dayWidth,
                         );
                         if (!hg) return null;
@@ -1672,7 +2006,7 @@ export function GanttBoard({
             const inHiddenFolder = !!r.isHiddenFolder;
             const geo =
               t.start &&
-              barGeometry(days, t.start, t.durationDays, holidaysOn, dayWidth);
+              barGeometry(days, t.start, t.durationDays, cal, dayWidth);
             const canPlace = !readOnly && !t.start && !t.isMarker && !inHiddenFolder;
             const placeGhost =
               canPlace &&
@@ -1681,7 +2015,7 @@ export function GanttBoard({
                 days,
                 placeHover.start,
                 Math.max(1, t.durationDays || 1),
-                holidaysOn,
+                cal,
                 dayWidth,
               );
 
@@ -1830,10 +2164,18 @@ export function GanttBoard({
                       ) : t.pendingCreate ? (
                         <button
                           type="button"
-                          className="pg-local-delete"
-                          title="Delete draft task"
-                          aria-label="Delete draft task"
-                          onClick={() => onDeleteDraftTask(t.id)}
+                          className={`pg-local-delete${planMode ? " pg-plan-delete" : ""}`}
+                          title={planMode ? "Delete planned task" : "Delete draft task"}
+                          aria-label={planMode ? "Delete planned task" : "Delete draft task"}
+                          onClick={() =>
+                            planMode
+                              ? setPendingPlanDelete({
+                                  kind: "task",
+                                  id: t.id,
+                                  title: t.title,
+                                })
+                              : onDeleteDraftTask(t.id)
+                          }
                         >
                           ×
                         </button>
@@ -1864,7 +2206,7 @@ export function GanttBoard({
                       onChange={(e) => {
                         const startVal = e.target.value || null;
                         const due = startVal
-                          ? dueFromStartDuration(startVal, t.durationDays, holidaysOn)
+                          ? dueFromStartDuration(startVal, t.durationDays, cal)
                           : t.due;
                         onScheduleEdit(t.id, { start: startVal, due });
                       }}
@@ -1895,7 +2237,7 @@ export function GanttBoard({
                             }
                             const durationDays = Math.max(1, Number(raw) || 1);
                             const due = t.start
-                              ? dueFromStartDuration(t.start, durationDays, holidaysOn)
+                              ? dueFromStartDuration(t.start, durationDays, cal)
                               : t.due;
                             onScheduleEdit(t.id, {
                               durationDays,
@@ -2006,7 +2348,7 @@ export function GanttBoard({
                       historyOverlay,
                       compareDate,
                       days,
-                      holidaysOn,
+                      cal,
                       dayWidth,
                     );
                     if (!hg) return null;
@@ -2066,6 +2408,8 @@ export function GanttBoard({
                             ? " resizing"
                             : " dragging"
                           : ""
+                      }${hoverPrereqKeys.has(t.id) ? " prereq-source" : ""}${
+                        hoverPrereq?.taskId === t.id ? " prereq-target" : ""
                       }`}
                       style={{
                         left: geo.left,
@@ -2081,6 +2425,26 @@ export function GanttBoard({
                               ? `Should have started ${t.start} — still “${t.status}”`
                               : undefined
                       }
+                      onMouseEnter={(e) => {
+                        if (preview || !t.blockedBy.length) return;
+                        hoverPrereqTargetRef.current = {
+                          el: e.currentTarget,
+                          taskId: t.id,
+                        };
+                        const r = e.currentTarget.getBoundingClientRect();
+                        setHoverPrereq({
+                          taskId: t.id,
+                          top: r.top,
+                          bottom: r.bottom,
+                          left: r.left,
+                        });
+                      }}
+                      onMouseLeave={() => {
+                        if (hoverPrereqTargetRef.current?.taskId === t.id) {
+                          hoverPrereqTargetRef.current = null;
+                        }
+                        setHoverPrereq((prev) => (prev?.taskId === t.id ? null : prev));
+                      }}
                       onPointerDown={(e) => {
                         if (!t.start) return;
                         beginDrag(
@@ -2097,6 +2461,15 @@ export function GanttBoard({
                       }}
                     >
                       <span className="pg-bar-label">{t.friendlyId}</span>
+                      {t.blockedBy.length ? (
+                        <span
+                          className="pg-bar-prereq-flag"
+                          aria-hidden
+                          title={`Blocked by ${t.blockedBy.join(", ")}`}
+                        >
+                          ⛓
+                        </span>
+                      ) : null}
                       {isOverdue(t) ? (
                         <span className="pg-bar-overdue" aria-hidden>
                           !
@@ -2159,8 +2532,85 @@ export function GanttBoard({
               ))}
             </svg>
           )}
+
+          {hoverDepPaths.length > 0 && (
+            <svg
+              className="pg-deps-svg pg-deps-hover"
+              width={trackW}
+              height={canvasH}
+              style={{ left: leftW, top: 0 }}
+            >
+              <defs>
+                <marker
+                  id="dep-arrow-hover"
+                  viewBox="0 0 10 10"
+                  refX="9"
+                  refY="5"
+                  markerWidth="11"
+                  markerHeight="11"
+                  markerUnits="userSpaceOnUse"
+                  orient="auto-start-reverse"
+                >
+                  <path className="pg-dep-arrow-hover" d="M1.5,1.5 L9,5 L1.5,8.5 Z" />
+                </marker>
+              </defs>
+              {hoverDepPaths.map((p, i) => (
+                <g key={i}>
+                  <circle className="pg-dep-dot-hover" cx={p.x1} cy={p.y1} r={3.4} />
+                  <path
+                    className="pg-dep-path-hover"
+                    d={p.d}
+                    markerEnd="url(#dep-arrow-hover)"
+                  />
+                </g>
+              ))}
+            </svg>
+          )}
         </div>
       </div>
+
+      {hoverPrereq && hoverPrereqItems.length > 0
+        ? createPortal(
+            <div
+              className="pg-prereq-pop"
+              role="tooltip"
+              style={{
+                left: Math.min(Math.max(8, hoverPrereq.left), window.innerWidth - 300),
+                ...(hoverPrereq.top > 240
+                  ? { bottom: window.innerHeight - hoverPrereq.top + 8 }
+                  : { top: hoverPrereq.bottom + 8 }),
+              }}
+            >
+              <div className="pg-prereq-pop-title">
+                Blocked by {hoverPrereqItems.length} prerequisite
+                {hoverPrereqItems.length > 1 ? "s" : ""}
+              </div>
+              <ul className="pg-prereq-pop-list">
+                {hoverPrereqItems.map((item) => (
+                  <li
+                    key={item.key}
+                    className={`pg-prereq-pop-item${item.done ? " done" : ""}`}
+                  >
+                    <span className="pg-prereq-pop-key">{item.key}</span>
+                    <span className="pg-prereq-pop-title-text">
+                      {item.title || "Not on this board"}
+                    </span>
+                    <span className="pg-prereq-pop-meta">
+                      {item.onBoard
+                        ? `${item.status || "No status"}${
+                            item.start || item.due
+                              ? ` · ${item.start || "?"} → ${item.due || "?"}`
+                              : ""
+                          }`
+                        : "Outside the current JQL"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {!preview && (
         <>
@@ -2205,6 +2655,19 @@ export function GanttBoard({
           )}
         </>
       )}
+      {pendingPlanDelete ? (
+        <ConfirmDialog
+          title={`Delete planned ${pendingPlanDelete.kind}?`}
+          message={
+            pendingPlanDelete.kind === "epic"
+              ? `Remove “${pendingPlanDelete.title}” and all its planned tasks? This change will autosave to the draft ticket.`
+              : `Remove planned task “${pendingPlanDelete.title}”? This change will autosave to the draft ticket.`
+          }
+          confirmLabel="Delete"
+          onCancel={() => setPendingPlanDelete(null)}
+          onConfirm={confirmPlanDelete}
+        />
+      ) : null}
     </div>
   );
 }

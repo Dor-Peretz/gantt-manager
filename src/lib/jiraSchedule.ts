@@ -2,6 +2,7 @@ import {
   dueFromStartDuration,
   durationFromStartDue,
   startFromDueDuration,
+  type WorkCalendar,
 } from "./workdays";
 
 export function parseStoryPoints(raw: unknown): number | null {
@@ -21,7 +22,7 @@ export function scheduleFromFields(
   start: string | null,
   due: string | null,
   sp: number | null,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
 ): { start: string | null; due: string | null; durationDays: number; estDays: number | null } {
   const estDays = sp != null && Number.isFinite(sp) && sp > 0 ? sp : null;
   const estDur = estDays != null ? Math.max(1, Math.round(estDays)) : null;
@@ -30,14 +31,14 @@ export function scheduleFromFields(
     if (start) {
       return {
         start,
-        due: dueFromStartDuration(start, estDur, holidaysOn),
+        due: dueFromStartDuration(start, estDur, cal),
         durationDays: estDur,
         estDays,
       };
     }
     if (due) {
       return {
-        start: startFromDueDuration(due, estDur, holidaysOn),
+        start: startFromDueDuration(due, estDur, cal),
         due,
         durationDays: estDur,
         estDays,
@@ -50,7 +51,7 @@ export function scheduleFromFields(
     return {
       start,
       due,
-      durationDays: durationFromStartDue(start, due, holidaysOn),
+      durationDays: durationFromStartDue(start, due, cal),
       estDays: null,
     };
   }

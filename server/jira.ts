@@ -17,12 +17,14 @@ import {
   normalizeColumnWidths,
 } from "../src/lib/types.ts";
 import {
-  dueFromStartDuration,
   initialsFromName,
   setCustomNonWorkingDays,
+  workCalendarFrom,
+  type WorkCalendar,
 } from "../src/lib/workdays.ts";
 import { parseStoryPoints, scheduleFromFields } from "../src/lib/jiraSchedule.ts";
 import { applySavedBoardOrder } from "../src/lib/boardOrder.ts";
+import { dedupeSprints, parseSprintField } from "../src/lib/sprints.ts";
 import {
   dedupeQaItems,
   filterQaItemsForBoard,
@@ -59,6 +61,7 @@ const FALLBACK_FIELDS = {
   storyPoints: "customfield_10008",
   team: "customfield_10500",
   epicLink: "customfield_10004",
+  sprint: "customfield_10003",
 };
 
 interface FieldMap {
@@ -66,7 +69,11 @@ interface FieldMap {
   storyPoints: string;
   team: string;
   epicLink: string;
+  sprint: string;
 }
+
+/** Jira's schema type for the agile Sprint field — stable across sites, unlike the id. */
+const SPRINT_SCHEMA_TYPE = "com.pyxis.greenhopper.jira:gh-sprint";
 
 interface JiraIssue {
   key: string;
@@ -90,7 +97,7 @@ function baseUrl(): string {
   return requireEnv("JIRA_BASE_URL").replace(/\/$/, "");
 }
 
-async function jiraFetch(pathname: string, init: RequestInit = {}): Promise<Response> {
+export async function jiraFetch(pathname: string, init: RequestInit = {}): Promise<Response> {
   const url = pathname.startsWith("http") ? pathname : `${baseUrl()}${pathname}`;
   const headers = new Headers(init.headers);
   headers.set("Authorization", authHeader());
@@ -109,8 +116,13 @@ export async function discoverFields(): Promise<FieldMap> {
   try {
     const res = await jiraFetch("/rest/api/3/field");
     if (!res.ok) throw new Error(`field discovery failed: ${res.status}`);
-    const fields = (await res.json()) as Array<{ id: string; name: string }>;
+    const fields = (await res.json()) as Array<{
+      id: string;
+      name: string;
+      schema?: { custom?: string };
+    }>;
     const byName = new Map(fields.map((f) => [f.name.toLowerCase(), f.id]));
+    const sprintField = fields.find((f) => f.schema?.custom === SPRINT_SCHEMA_TYPE);
     cachedFields = {
       startDate: byName.get("start date") || FALLBACK_FIELDS.startDate,
       storyPoints:
@@ -120,6 +132,7 @@ export async function discoverFields(): Promise<FieldMap> {
         FALLBACK_FIELDS.storyPoints,
       team: byName.get("team") || FALLBACK_FIELDS.team,
       epicLink: byName.get("epic link") || FALLBACK_FIELDS.epicLink,
+      sprint: sprintField?.id || byName.get("sprint") || FALLBACK_FIELDS.sprint,
     };
     // Prefer the verified Start date field when multiple "Start date" exist
     const startCandidates = fields.filter((f) => f.name.toLowerCase() === "start date");
@@ -172,7 +185,7 @@ function ownerLabel(fields: Record<string, unknown>, fieldMap: FieldMap): string
 function taskFromIssue(
   issue: JiraIssue,
   fieldMap: FieldMap,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
   resourceId: string | null,
 ): GanttTask {
   const f = issue.fields;
@@ -180,7 +193,7 @@ function taskFromIssue(
   const startRaw = (f[fieldMap.startDate] as string | null) || null;
   const dueRaw = (f.duedate as string | null) || null;
   const sp = parseStoryPoints(f[fieldMap.storyPoints]);
-  const schedule = scheduleFromFields(startRaw, dueRaw, sp, holidaysOn);
+  const schedule = scheduleFromFields(startRaw, dueRaw, sp, cal);
   const assignee = f.assignee as { accountId?: string; displayName?: string } | null;
   const status = (f.status as { name?: string } | null)?.name || "—";
 
@@ -295,7 +308,7 @@ async function fetchEpicSummaries(keys: string[]): Promise<Map<string, string>> 
 export async function pullFromJira(jql: string): Promise<GanttModel> {
   const fieldMap = await discoverFields();
   const local = readState();
-  const holidaysOn = local.showHolidays !== false;
+  const cal = workCalendarFrom(local);
   setCustomNonWorkingDays(local.customNonWorkingDays || []);
 
   const fields = [
@@ -312,9 +325,13 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     fieldMap.storyPoints,
     fieldMap.team,
     fieldMap.epicLink,
+    fieldMap.sprint,
   ];
 
   const issues = await searchAll(jql, fields, [QA_PROPERTY_KEY]);
+  const sprints = dedupeSprints(
+    issues.flatMap((issue) => parseSprintField(issue.fields[fieldMap.sprint])),
+  );
 
   // QA items (integration tests / E2E flows) ride along as an issue property on
   // each linked ticket. Search only returns properties it was asked for, so any
@@ -419,7 +436,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       displayName?: string;
     } | null;
     const resourceId = resourceFromAssignee(assignee);
-    const task = taskFromIssue(issue, fieldMap, holidaysOn, resourceId);
+    const task = taskFromIssue(issue, fieldMap, cal, resourceId);
 
     ensureEpic(epicKey);
     tasksByEpic.get(epicKey)!.push(task);
@@ -440,7 +457,7 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
       displayName?: string;
     } | null;
     const resourceId = resourceFromAssignee(assignee);
-    tasks.push(taskFromIssue(epicIssue, fieldMap, holidaysOn, resourceId));
+    tasks.push(taskFromIssue(epicIssue, fieldMap, cal, resourceId));
   }
 
   // Fill titles for epics that only appeared as parents of stories
@@ -506,11 +523,15 @@ export async function pullFromJira(jql: string): Promise<GanttModel> {
     resourcesDockCollapsed: local.resourcesDockCollapsed === true,
     hoursPerDay: 8,
     showHolidays: local.showHolidays !== false,
+    showPolishHolidays: local.showPolishHolidays === true,
+    workingWeekdays: local.workingWeekdays?.length ? local.workingWeekdays : [0, 1, 2, 3, 4],
     showDeps: local.showDeps === true,
+    showSprints: local.showSprints !== false,
     customNonWorkingDays: local.customNonWorkingDays ?? [],
     jql,
     resources,
     milestones,
+    sprints,
     pulledAt: new Date().toISOString(),
     hiddenFolderCollapsed: local.hiddenFolderCollapsed !== false,
   };

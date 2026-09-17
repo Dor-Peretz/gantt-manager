@@ -8,8 +8,14 @@
 import type {
   GanttModel,
   GanttTask,
+  JiraPlan,
   LocalState,
   Milestone,
+  PlanLoadResult,
+  PlanPublishItemResult,
+  PlanPublishResult,
+  PlanSaveResult,
+  PlanValidateResult,
   PushItem,
   PushResult,
   QaItem,
@@ -17,10 +23,13 @@ import type {
   StatusTransition,
 } from "../src/lib/types.ts";
 import { normalizeColumnWidths } from "../src/lib/types.ts";
+import { emptyPlan } from "../src/lib/planStorage.ts";
 import {
   dueFromStartDuration,
   initialsFromName,
   setCustomNonWorkingDays,
+  workCalendarFrom,
+  type WorkCalendar,
 } from "../src/lib/workdays.ts";
 import { applySavedBoardOrder } from "../src/lib/boardOrder.ts";
 import {
@@ -153,6 +162,9 @@ export function demoPreferences(): Partial<LocalState> {
     projectStart: PROJECT_START,
     dayWidthPx: 24,
     showHolidays: true,
+    showPolishHolidays: false,
+    workingWeekdays: [0, 1, 2, 3, 4],
+    showSprints: true,
     showDeps: true,
     theme: "light",
     resources: demoResources(),
@@ -172,9 +184,9 @@ export function demoHealth(): { ok: true; site: string; displayName: string } {
   };
 }
 
-function taskFromSpec(spec: TaskSpec, holidaysOn: boolean): GanttTask {
+function taskFromSpec(spec: TaskSpec, cal: WorkCalendar): GanttTask {
   const person = PERSON_BY_ID.get(spec.who);
-  const due = spec.due ?? dueFromStartDuration(spec.start, spec.durationDays, holidaysOn);
+  const due = spec.due ?? dueFromStartDuration(spec.start, spec.durationDays, cal);
   const resourceIds = person ? [person.id] : [];
   return {
     id: spec.key,
@@ -210,13 +222,13 @@ export interface DemoPull {
 /** Board built from the fake dataset, with the viewer's saved prefs applied. */
 export function demoPull(jql: string, local: LocalState): DemoPull {
   setCustomNonWorkingDays(local.customNonWorkingDays ?? []);
-  const holidaysOn = local.showHolidays !== false;
+  const cal = workCalendarFrom(local);
   const savedMarkers = local.markers || {};
   const savedHidden = local.hiddenTasks || {};
 
   const milestones: Milestone[] = EPICS.map((epic) => {
     const tasks = TASKS.filter((t) => t.epic === epic.key).map((spec) => {
-      const task = taskFromSpec(spec, holidaysOn);
+      const task = taskFromSpec(spec, cal);
       task.isMarker = savedMarkers[task.id] === true;
       task.hidden = savedHidden[task.id] === true;
       return task;
@@ -245,12 +257,31 @@ export function demoPull(jql: string, local: LocalState): DemoPull {
     resourcesDockHeight: local.resourcesDockHeight || 220,
     resourcesDockCollapsed: local.resourcesDockCollapsed === true,
     hoursPerDay: 8,
-    showHolidays: holidaysOn,
+    showHolidays: local.showHolidays !== false,
+    showPolishHolidays: local.showPolishHolidays === true,
+    workingWeekdays: local.workingWeekdays?.length ? local.workingWeekdays : [0, 1, 2, 3, 4],
     showDeps: local.showDeps === true,
+    showSprints: local.showSprints !== false,
     customNonWorkingDays: local.customNonWorkingDays ?? [],
     jql: jql || DEMO_JQL,
     resources,
     milestones,
+    sprints: [
+      {
+        id: "demo-41",
+        name: "Sprint 41",
+        state: "closed",
+        start: "2026-08-23",
+        end: "2026-09-05",
+      },
+      {
+        id: "demo-42",
+        name: "Sprint 42",
+        state: "active",
+        start: "2026-09-06",
+        end: "2026-09-19",
+      },
+    ],
     pulledAt: new Date().toISOString(),
     hiddenFolderCollapsed: local.hiddenFolderCollapsed !== false,
   };
@@ -315,4 +346,76 @@ export function demoSaveQaItem(item: QaItem): void {
 
 export function demoDeleteQaItem(itemId: string): void {
   qaItems = qaItems.filter((q) => q.id !== itemId);
+}
+
+/** Demo plans live in memory only — nothing is written to Jira. */
+const demoPlans = new Map<string, JiraPlan>();
+let demoPublishSeq = 100;
+
+export function demoValidateDraftTicket(issueKey: string): PlanValidateResult {
+  const key = issueKey.trim();
+  if (!key) return { ok: false, error: "Enter a Jira draft ticket key or URL" };
+  return { ok: true, key, summary: `Demo draft ticket ${key}` };
+}
+
+export function demoLoadPlan(draftTicketKey: string, viewerEmail?: string): PlanLoadResult {
+  const existing = demoPlans.get(draftTicketKey);
+  if (existing) return { plan: existing, created: false };
+  const plan = emptyPlan(draftTicketKey);
+  if (viewerEmail) plan.updatedBy = viewerEmail;
+  demoPlans.set(draftTicketKey, plan);
+  return { plan, created: true };
+}
+
+export function demoSavePlan(plan: JiraPlan): PlanSaveResult {
+  const next: JiraPlan = {
+    ...plan,
+    revision: plan.revision + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  demoPlans.set(next.draftTicketKey, next);
+  return { plan: next };
+}
+
+export function demoPublishPlan(plan: JiraPlan): PlanPublishResult {
+  const projectKey = plan.draftTicketKey.split("-")[0] || "DEMO";
+  const publishedKeys: Record<string, string> = { ...(plan.publishedKeys || {}) };
+  const results: PlanPublishItemResult[] = [];
+  const nextKey = () => `${projectKey}-${++demoPublishSeq}`;
+
+  const epics = plan.epics.map((epic) => {
+    const epicKey = epic.publishedKey || publishedKeys[epic.id] || nextKey();
+    publishedKeys[epic.id] = epicKey;
+    results.push({
+      planId: epic.id,
+      kind: "epic",
+      title: epic.title,
+      status: epic.publishedKey ? "skipped" : "ok",
+      jiraKey: epicKey,
+    });
+    for (const task of epic.tasks) {
+      const taskKey = publishedKeys[task.id] || nextKey();
+      publishedKeys[task.id] = taskKey;
+      results.push({
+        planId: task.id,
+        kind: "task",
+        title: task.title,
+        status: "ok",
+        jiraKey: taskKey,
+      });
+    }
+    return { ...epic, publishedKey: epicKey, tasks: [...epic.tasks] };
+  });
+
+  const published: JiraPlan = {
+    ...plan,
+    epics,
+    publishedKeys,
+    publishState: "published",
+    publishedAt: new Date().toISOString(),
+    revision: plan.revision + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  demoPlans.set(published.draftTicketKey, published);
+  return { plan: published, results, allOk: true };
 }

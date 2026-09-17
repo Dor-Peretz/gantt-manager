@@ -1,32 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  deleteQaItem,
-  fetchChangelogs,
-  fetchConfig,
-  fetchHealth,
-  loadCache,
-  pullGantt,
-  pushGantt,
-  saveCache,
-  saveQaItem,
-  saveState,
-  type ScrollState,
-} from "./api";
+import { useGanttStore } from "./app/useGanttStore";
 import { AppFooter } from "./brand/AppFooter";
 import { BrandLockup } from "./brand/BrandMark";
 import { applyModelOrder } from "./lib/boardOrder";
 import { AddMilestoneDialog } from "./gantt/AddMilestoneDialog";
+import { AddPlanEpicDialog } from "./gantt/AddPlanEpicDialog";
 import { AddQaItemDialog, type BoardTaskOption } from "./gantt/AddQaItemDialog";
 import { AddTaskDialog } from "./gantt/AddTaskDialog";
+import type { DeletableTimelineItem } from "./gantt/AddTimelineMenu";
+import { AppGuideDialog } from "./gantt/AppGuideDialog";
+import { ConfirmDialog } from "./gantt/ConfirmDialog";
+import { PlanModeDialog } from "./gantt/PlanModeDialog";
 import { ProjectOptionsPanel } from "./gantt/ProjectOptionsPanel";
+import { PublishPlanDialog } from "./gantt/PublishPlanDialog";
 import { SaveJqlDialog } from "./gantt/SaveJqlDialog";
+import { ShareJqlDialog } from "./gantt/ShareJqlDialog";
 import { GanttBoard } from "./gantt/GanttBoard";
+import { GanttFilters } from "./gantt/GanttFilters";
+import { HistoryMenu } from "./gantt/HistoryMenu";
+import {
+  EMPTY_GANTT_FILTERS,
+  filterGanttModel,
+  hasActiveGanttFilters,
+  type GanttFilterValue,
+} from "./gantt/filtering";
 import {
   collectDraftTasks,
   draftToTask,
   injectDraftTasks,
   newDraftTaskId,
 } from "./lib/draftTasks";
+import { newPlanEpicId, newPlanTaskId, parseDraftTicketInput } from "./lib/planIds";
+import { countPlanItems, ganttModelToPlan, planToGanttModel } from "./lib/planModel";
+import { jqlFromShareUrl } from "./lib/shareLink";
 import {
   collectLocalMarkers,
   injectLocalMarkers,
@@ -57,9 +63,11 @@ import type {
   HistoryFieldMap,
   HistoryViewMode,
   IssueChangelog,
+  JiraPlan,
   LocalMarker,
   LocalState,
   PendingQaDelete,
+  PlanPublishItemResult,
   PushResult,
   QaItem,
   QaKind,
@@ -74,12 +82,21 @@ import {
   initialsFromName,
   setCustomNonWorkingDays,
   todayLocal,
+  workCalendarFrom,
 } from "./lib/workdays";
+import type { ScrollState } from "./store/GanttStore";
 
 function colorForName(name: string): string {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
   return DEFAULT_COLORS[Math.abs(h) % DEFAULT_COLORS.length];
+}
+
+function viewerDisplayName(viewer: { email: string; name?: string }): string {
+  const name = viewer.name?.trim();
+  if (name) return name;
+  const local = viewer.email.split("@")[0] || viewer.email;
+  return local.replace(/[._-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function newSavedJqlId(): string {
@@ -107,6 +124,23 @@ function formatCompareLabel(ymd: string): string {
   const d = new Date(`${ymd}T12:00:00`);
   if (Number.isNaN(d.getTime())) return ymd;
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+function formatPlanSavedAt(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return null;
+  const diffMs = Date.now() - at.getTime();
+  if (diffMs < 15_000) return "just now";
+  if (diffMs < 60_000) return "less than a minute ago";
+  const mins = Math.round(diffMs / 60_000);
+  if (mins < 60) return `${mins} min ago`;
+  return at.toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function assigneeAccountIdForPush(t: GanttTask): string | null | undefined {
@@ -137,6 +171,13 @@ function countDirty(m: GanttModel): number {
   for (const ms of m.milestones)
     for (const t of ms.tasks) if (t.dirty && !t.localOnly) n++;
   return n;
+}
+
+function countBoardItems(model: GanttModel): number {
+  return model.milestones.reduce(
+    (count, milestone) => count + Math.max(1, milestone.tasks.length),
+    0,
+  );
 }
 
 function prefsFromModel(
@@ -176,7 +217,10 @@ function prefsFromModel(
     milestoneColors,
     projectStart: next.projectStart,
     showHolidays: next.showHolidays,
+    showPolishHolidays: next.showPolishHolidays === true,
+    workingWeekdays: next.workingWeekdays,
     showDeps: next.showDeps,
+    showSprints: next.showSprints !== false,
     customNonWorkingDays: next.customNonWorkingDays,
     dayWidthPx: next.dayWidthPx,
     leftPanelWidth: next.leftPanelWidth,
@@ -184,6 +228,41 @@ function prefsFromModel(
     resourcesDockHeight: next.resourcesDockHeight,
     resourcesDockCollapsed: next.resourcesDockCollapsed,
     jql: jqlOverride ?? next.jql,
+  };
+}
+
+/** Calendar / layout prefs only — safe to save during Plan mode without wiping local milestones. */
+function layoutPrefsFromModel(next: GanttModel): Partial<LocalState> {
+  return {
+    projectStart: next.projectStart,
+    showHolidays: next.showHolidays,
+    showPolishHolidays: next.showPolishHolidays === true,
+    workingWeekdays: next.workingWeekdays,
+    customNonWorkingDays: next.customNonWorkingDays,
+    dayWidthPx: next.dayWidthPx,
+    leftPanelWidth: next.leftPanelWidth,
+    columnWidths: normalizeColumnWidths(next.columnWidths),
+    resourcesDockHeight: next.resourcesDockHeight,
+    resourcesDockCollapsed: next.resourcesDockCollapsed,
+  };
+}
+
+function applyLayoutPrefs(model: GanttModel, layout: Partial<GanttModel>): GanttModel {
+  return {
+    ...model,
+    projectStart: layout.projectStart || model.projectStart,
+    showHolidays: layout.showHolidays !== false,
+    showPolishHolidays: layout.showPolishHolidays === true,
+    workingWeekdays: layout.workingWeekdays?.length
+      ? layout.workingWeekdays
+      : model.workingWeekdays,
+    customNonWorkingDays: layout.customNonWorkingDays ?? model.customNonWorkingDays,
+    dayWidthPx: layout.dayWidthPx || model.dayWidthPx,
+    leftPanelWidth: layout.leftPanelWidth || model.leftPanelWidth,
+    columnWidths: normalizeColumnWidths(layout.columnWidths ?? model.columnWidths),
+    resourcesDockHeight: layout.resourcesDockHeight || model.resourcesDockHeight,
+    resourcesDockCollapsed:
+      layout.resourcesDockCollapsed ?? model.resourcesDockCollapsed,
   };
 }
 
@@ -200,8 +279,16 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
       previous.hiddenFolderCollapsed !== undefined
         ? previous.hiddenFolderCollapsed
         : fresh.hiddenFolderCollapsed,
+    projectStart: previous.projectStart || fresh.projectStart,
+    showHolidays: previous.showHolidays !== false,
+    showPolishHolidays: previous.showPolishHolidays === true,
+    workingWeekdays: previous.workingWeekdays?.length
+      ? previous.workingWeekdays
+      : fresh.workingWeekdays,
+    showDeps: previous.showDeps === true,
+    showSprints: previous.showSprints !== false,
     customNonWorkingDays:
-      fresh.customNonWorkingDays ?? previous.customNonWorkingDays ?? [],
+      previous.customNonWorkingDays ?? fresh.customNonWorkingDays ?? [],
     milestones: fresh.milestones.map((m) => {
       const prev = prevById.get(m.id);
       return {
@@ -269,22 +356,22 @@ function mergeDirtySchedule(fresh: GanttModel, previous: GanttModel): GanttModel
 }
 
 export default function App() {
+  const { store, viewerEmail, mode, viewer } = useGanttStore();
+  const profileName = viewerDisplayName(viewer);
   const [model, setModel] = useState<GanttModel>(() => emptyModel());
   const [jql, setJql] = useState("");
   const [savedJqls, setSavedJqls] = useState<SavedJql[]>([]);
   const [activeSavedJqlId, setActiveSavedJqlId] = useState<string | null>(null);
   const [jiraBaseUrl, setJiraBaseUrl] = useState("https://sunbit.atlassian.net");
-  const [health, setHealth] = useState<{
-    ok: boolean;
-    site?: string;
-    displayName?: string;
-    error?: string;
-  } | null>(null);
+  const [health, setHealth] = useState<{ ok: boolean; site?: string; error?: string } | null>(
+    null,
+  );
   const [busy, setBusy] = useState<"pull" | "push" | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [historyViewMode, setHistoryViewMode] = useState<HistoryViewMode>("asOf");
   const [compareDate, setCompareDate] = useState(defaultCompareDate);
+  const [filters, setFilters] = useState<GanttFilterValue>(EMPTY_GANTT_FILTERS);
   const [historyCache, setHistoryCache] = useState<Map<string, IssueChangelog>>(() => new Map());
   const [historyFieldMap, setHistoryFieldMap] = useState<HistoryFieldMap | null>(null);
   const historyFetchGen = useRef(0);
@@ -314,22 +401,22 @@ export default function App() {
     if (!nextModel.milestones.length) return;
     if (cacheTimer.current) clearTimeout(cacheTimer.current);
     cacheTimer.current = setTimeout(() => {
-      void saveCache({
+      void store.saveCache(viewerEmail, {
         model: nextModel,
         scroll: nextScroll || scrollRef.current || { tasksLeft: 0, tasksTop: 0, resLeft: 0 },
         savedAt: new Date().toISOString(),
       }).catch(() => undefined);
     }, 300);
-  }, []);
+  }, [store, viewerEmail]);
 
   const persistLocal = useCallback(async (partial: Partial<LocalState>) => {
     try {
-      await saveState(partial);
+      await store.savePreferences(viewerEmail, partial);
       setPrefsSavedAt(new Date().toLocaleTimeString());
     } catch {
       /* non-fatal */
     }
-  }, []);
+  }, [store, viewerEmail]);
 
   const runPull = useCallback(
     async (
@@ -348,7 +435,7 @@ export default function App() {
       setPushResults(null);
       if (!opts?.silent) setStatus("Pulling from Jira…");
       try {
-        let next = await pullGantt(q);
+        let next = await store.pull(q, viewerEmail);
         if (opts?.previous) next = mergeDirtySchedule(next, opts.previous);
         else {
           if (opts?.localMarkers?.length) {
@@ -386,7 +473,7 @@ export default function App() {
         setBusy(null);
       }
     },
-    [persistLocal, persistCache],
+    [persistLocal, persistCache, store, viewerEmail],
   );
 
   useEffect(() => {
@@ -395,17 +482,19 @@ export default function App() {
     void (async () => {
       try {
         const [cfg, h, cache] = await Promise.all([
-          fetchConfig(),
-          fetchHealth(),
-          loadCache(),
+          store.getConfig(viewerEmail),
+          store.getHealth(),
+          store.loadCache(viewerEmail),
         ]);
         const prefs = cfg.preferences;
-        const savedJql = prefs?.jql || cfg.jql || cache?.model.jql || "";
+        const sharedJql = jqlFromShareUrl();
+        const savedJql = sharedJql || prefs?.jql || cfg.jql || cache?.model.jql || "";
         const savedTheme: ThemeMode = prefs?.theme === "dark" ? "dark" : "light";
         setJql(savedJql);
         setSavedJqls(prefs?.savedJqls ?? []);
         setActiveSavedJqlId(prefs?.activeSavedJqlId ?? null);
         setPendingQaDeletes(prefs?.pendingQaDeletes ?? []);
+        setSavedPlanDraftTicket(prefs?.planDraftTicketKey ?? null);
         setTheme(savedTheme);
         applyTheme(savedTheme);
         if (cfg.baseUrl) setJiraBaseUrl(cfg.baseUrl.replace(/\/$/, ""));
@@ -417,7 +506,10 @@ export default function App() {
             jql: savedJql || cache.model.jql,
             projectStart: prefs?.projectStart || cache.model.projectStart,
             showHolidays: prefs?.showHolidays !== false,
+            showPolishHolidays: prefs?.showPolishHolidays === true,
+            workingWeekdays: prefs?.workingWeekdays ?? cache.model.workingWeekdays ?? [0, 1, 2, 3, 4],
             showDeps: prefs?.showDeps === true,
+            showSprints: prefs?.showSprints !== false,
             customNonWorkingDays:
               prefs?.customNonWorkingDays ?? cache.model.customNonWorkingDays ?? [],
             dayWidthPx: prefs?.dayWidthPx || cache.model.dayWidthPx,
@@ -470,7 +562,10 @@ export default function App() {
             jql: savedJql,
             projectStart: prefs?.projectStart || m.projectStart,
             showHolidays: prefs?.showHolidays !== false,
+            showPolishHolidays: prefs?.showPolishHolidays === true,
+            workingWeekdays: prefs?.workingWeekdays ?? m.workingWeekdays ?? [0, 1, 2, 3, 4],
             showDeps: prefs?.showDeps === true,
+            showSprints: prefs?.showSprints !== false,
             customNonWorkingDays: prefs?.customNonWorkingDays ?? [],
             dayWidthPx: prefs?.dayWidthPx || m.dayWidthPx,
             leftPanelWidth: prefs?.leftPanelWidth || m.leftPanelWidth,
@@ -483,18 +578,29 @@ export default function App() {
 
         setHealth(h);
         if (!h.ok) {
-          setHint(h.error || "Jira auth not configured — fill in .env");
+          setHint(h.error || "Jira not connected — check Datadog Jira integration");
           return;
         }
 
         if (savedJql) {
+          if (sharedJql) {
+            void persistLocal({ jql: sharedJql, activeSavedJqlId: null });
+            setActiveSavedJqlId(null);
+            setHint(`Loaded JQL from share link — pulling from Jira…`);
+          }
           const dirty = restored ? countDirty(restored) : 0;
           if (dirty > 0) {
             setHint(
-              `Connected: ${h.site} · ${dirty} unpushed edit(s) — skipped auto-pull. Push or Pull manually.`,
+              sharedJql
+                ? `Share link JQL loaded · ${dirty} unpushed edit(s) — skipped auto-pull`
+                : `Connected: ${h.site} · ${dirty} unpushed edit(s) — skipped auto-pull. Push or Pull manually.`,
             );
           } else {
-            setHint(`Connected: ${h.site} · refreshing from Jira…`);
+            setHint(
+              sharedJql
+                ? `Share link JQL loaded · refreshing from Jira…`
+                : `Connected: ${h.site} · refreshing from Jira…`,
+            );
             await runPull(savedJql, {
               silent: true,
               previous: restored || undefined,
@@ -507,10 +613,10 @@ export default function App() {
         }
       } catch (err) {
         setHealth({ ok: false, error: err instanceof Error ? err.message : String(err) });
-        setHint("Server not reachable. Run `npm run dev`.");
+        setHint("Could not reach backend — try `?store=local` for offline preview");
       }
     })();
-  }, [runPull]);
+  }, [persistLocal, runPull, store, viewerEmail]);
 
   const dirtyTasks = useMemo(() => {
     const out: GanttTask[] = [];
@@ -548,7 +654,7 @@ export default function App() {
         for (let i = 0; i < jiraKeys.length; i += HISTORY_CHUNK) {
           if (cancelled || gen !== historyFetchGen.current) return;
           const chunk = jiraKeys.slice(i, i + HISTORY_CHUNK);
-          const result = await fetchChangelogs(chunk);
+          const result = await store.fetchChangelogs(chunk);
           if (!fieldMap) fieldMap = result.fieldMap;
           for (const entry of result.changelogs) cache.set(entry.key, entry);
         }
@@ -568,12 +674,19 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [compareEnabled, jiraKeys]);
+  }, [compareEnabled, jiraKeys, store]);
+
+  const {
+    milestones: overlayMilestones,
+    showHolidays: overlayShowHolidays,
+    showPolishHolidays: overlayShowPolishHolidays,
+    workingWeekdays: overlayWorkingWeekdays,
+  } = model;
 
   const historyOverlay = useMemo((): Map<string, HistoricalSchedule | null> | undefined => {
     if (!compareEnabled || !historyFieldMap || historyLoading) return undefined;
     const tasks: GanttTask[] = [];
-    for (const m of model.milestones) {
+    for (const m of overlayMilestones) {
       for (const t of m.tasks) {
         if (t.localOnly || t.pendingCreate) continue;
         tasks.push(t);
@@ -584,7 +697,11 @@ export default function App() {
       historyCache,
       compareDate,
       historyFieldMap,
-      model.showHolidays !== false,
+      workCalendarFrom({
+        showHolidays: overlayShowHolidays,
+        showPolishHolidays: overlayShowPolishHolidays,
+        workingWeekdays: overlayWorkingWeekdays,
+      }),
     );
   }, [
     compareEnabled,
@@ -592,8 +709,10 @@ export default function App() {
     historyCache,
     historyFieldMap,
     historyLoading,
-    model.milestones,
-    model.showHolidays,
+    overlayMilestones,
+    overlayShowHolidays,
+    overlayShowPolishHolidays,
+    overlayWorkingWeekdays,
   ]);
 
   const compareStats = useMemo(() => {
@@ -606,6 +725,27 @@ export default function App() {
     return applyHistoryToModel(model, historyOverlay, historyCache, compareDate);
   }, [compareEnabled, compareDate, historyCache, historyOverlay, historyViewMode, model]);
 
+  const filteredBoardModel = useMemo(
+    () => filterGanttModel(boardModel, filters),
+    [boardModel, filters],
+  );
+
+  const filterStatuses = useMemo(() => {
+    const statuses = new Set<string>();
+    for (const milestone of boardModel.milestones) {
+      for (const task of milestone.tasks) {
+        if (task.status) statuses.add(task.status);
+      }
+    }
+    return [...statuses].sort((a, b) => a.localeCompare(b));
+  }, [boardModel.milestones]);
+
+  const totalFilterItems = useMemo(() => countBoardItems(boardModel), [boardModel]);
+  const shownFilterItems = useMemo(
+    () => countBoardItems(filteredBoardModel),
+    [filteredBoardModel],
+  );
+
   const historyViewLabel =
     compareEnabled && !historyLoading
       ? historyViewMode === "overlay"
@@ -614,6 +754,19 @@ export default function App() {
       : null;
 
   const historyReadOnly = compareEnabled && historyViewMode === "asOf" && !historyLoading;
+
+  const historyStatsLabel =
+    compareEnabled && compareStats && !historyLoading
+      ? `${historyViewMode === "overlay" ? "Comparing" : "Viewing"} ${formatCompareLabel(
+          compareDate,
+        )}${
+          historyViewMode === "overlay" && compareStats.moved
+            ? ` · ${compareStats.moved} bars moved`
+            : historyViewMode === "asOf" && compareStats.scheduled
+              ? ` · ${compareStats.scheduled} scheduled`
+              : ""
+        }${compareStats.notCreated ? ` · ${compareStats.notCreated} not yet created` : ""}`
+      : null;
 
   const boardTaskOptions = useMemo((): BoardTaskOption[] => {
     const out: BoardTaskOption[] = [];
@@ -628,17 +781,53 @@ export default function App() {
   }, [model.milestones]);
 
   const [addMsOpen, setAddMsOpen] = useState(false);
+  const [editLocalMilestone, setEditLocalMilestone] = useState<LocalMarker | null>(null);
   const [addQaOpen, setAddQaOpen] = useState<QaKind | null>(null);
   const [editQaItem, setEditQaItem] = useState<QaItem | null>(null);
   const [addTaskOpen, setAddTaskOpen] = useState(false);
   const [saveJqlOpen, setSaveJqlOpen] = useState(false);
+  const [shareJqlOpen, setShareJqlOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewChromeHidden, setPreviewChromeHidden] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [planMode, setPlanMode] = useState(false);
+  const [plan, setPlan] = useState<JiraPlan | null>(null);
+  const [planDialogOpen, setPlanDialogOpen] = useState(false);
+  const [planDialogBusy, setPlanDialogBusy] = useState(false);
+  const [planDialogError, setPlanDialogError] = useState<string | null>(null);
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false);
+  const [publishBusy, setPublishBusy] = useState(false);
+  const [planPublishResults, setPlanPublishResults] = useState<PlanPublishItemResult[] | null>(
+    null,
+  );
+  const [planSaveState, setPlanSaveState] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+  const [planSaveError, setPlanSaveError] = useState<string | null>(null);
+  const [planSavedAt, setPlanSavedAt] = useState<string | null>(null);
+  const [addPlanEpicOpen, setAddPlanEpicOpen] = useState(false);
+  const [editPlanEpicId, setEditPlanEpicId] = useState<string | null>(null);
+  const [savedPlanDraftTicket, setSavedPlanDraftTicket] = useState<string | null>(null);
+  const [clearConfirmation, setClearConfirmation] = useState<string | null>(null);
+  const normalModelRef = useRef<GanttModel | null>(null);
+  const planRef = useRef<JiraPlan | null>(null);
+  const planRevisionRef = useRef(1);
+  const planSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setCustomNonWorkingDays(model.customNonWorkingDays || []);
   }, [model.customNonWorkingDays]);
+
+  useEffect(() => {
+    if (!planMode || planSaveState !== "error") return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [planMode, planSaveState]);
 
   useEffect(() => {
     if (!previewOpen) {
@@ -662,17 +851,176 @@ export default function App() {
     void persistLocal({ theme: next });
   }
 
+  const savePlanNow = useCallback(
+    async (nextModel?: GanttModel) => {
+      if (!planRef.current) return;
+      const modelToSave = nextModel ?? modelRef.current;
+      setPlanSaveState("saving");
+      setPlanSaveError(null);
+      try {
+        const draft = ganttModelToPlan(modelToSave, planRef.current);
+        draft.updatedBy = viewerEmail;
+        const { plan: saved } = await store.savePlan(draft, planRevisionRef.current);
+        planRef.current = saved;
+        planRevisionRef.current = saved.revision;
+        setPlan(saved);
+        setPlanSavedAt(saved.updatedAt);
+        setPlanSaveState("saved");
+        setPlanSaveError(null);
+        setError(null);
+        setHint(`Plan saved on Jira ticket ${saved.draftTicketKey}`);
+        setStatus(`Plan saved on ${saved.draftTicketKey}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setPlanSaveState("error");
+        setPlanSaveError(msg);
+        setError(msg);
+        setStatus("Plan save failed");
+      }
+    },
+    [store, viewerEmail],
+  );
+
+  const queuePlanSave = useCallback(
+    (nextModel: GanttModel) => {
+      if (!planRef.current) return;
+      if (planSaveTimer.current) clearTimeout(planSaveTimer.current);
+      setPlanSaveState("saving");
+      planSaveTimer.current = setTimeout(() => {
+        void savePlanNow(nextModel);
+      }, 500);
+    },
+    [savePlanNow],
+  );
+
+  function onSavePlan() {
+    if (planSaveTimer.current) clearTimeout(planSaveTimer.current);
+    void savePlanNow();
+  }
+
   const updateModel = useCallback(
     (updater: (prev: GanttModel) => GanttModel) => {
       setModel((prev) => {
         const next = updater(prev);
+        if (planMode) {
+          queuePlanSave(next);
+          void persistLocal(layoutPrefsFromModel(next));
+          if (normalModelRef.current) {
+            normalModelRef.current = applyLayoutPrefs(normalModelRef.current, next);
+          }
+          return next;
+        }
         void persistLocal(prefsFromModel(next, jql, pendingQaDeletesRef.current));
         persistCache(next, scrollRef.current);
         return next;
       });
     },
-    [persistLocal, persistCache, jql],
+    [planMode, queuePlanSave, persistLocal, persistCache, jql],
   );
+
+  async function onPlanModeContinue(draftInput: string) {
+    const key = parseDraftTicketInput(draftInput);
+    if (!key) {
+      setPlanDialogError("Enter a valid Jira draft ticket key or URL");
+      return;
+    }
+    setPlanDialogBusy(true);
+    setPlanDialogError(null);
+    try {
+      const validation = await store.validateDraftTicket(key);
+      if (!validation.ok || !validation.key) {
+        setPlanDialogError(validation.error || "Could not validate draft ticket");
+        return;
+      }
+      const { plan: loaded, created } = await store.loadPlan(validation.key, viewerEmail);
+      setSavedPlanDraftTicket(validation.key);
+      void persistLocal({ planDraftTicketKey: validation.key });
+      normalModelRef.current = modelRef.current;
+      planRef.current = loaded;
+      planRevisionRef.current = loaded.revision;
+      setPlan(loaded);
+      setModel(planToGanttModel(loaded, modelRef.current));
+      setPlanMode(true);
+      setPlanDialogOpen(false);
+      setPlanPublishResults(null);
+      setPlanSaveState("saved");
+      setPlanSaveError(null);
+      setPlanSavedAt(loaded.updatedAt);
+      setCompareEnabled(false);
+      setStatus(
+        created
+          ? `Plan mode · new plan on ${loaded.draftTicketKey}`
+          : `Plan mode · loaded ${loaded.draftTicketKey}`,
+      );
+      setHint(
+        created
+          ? `New plan created on Jira ticket ${loaded.draftTicketKey}`
+          : `Plan loaded from Jira ticket ${loaded.draftTicketKey}`,
+      );
+    } catch (err) {
+      setPlanDialogError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPlanDialogBusy(false);
+    }
+  }
+
+  function exitPlanMode() {
+    if (planSaveState === "error") {
+      if (
+        !window.confirm(
+          "Plan has changes that failed to save to the draft ticket. Leave Plan mode anyway?",
+        )
+      ) {
+        return;
+      }
+    } else if (planSaveState === "saving") {
+      if (!window.confirm("Plan is still saving. Leave Plan mode anyway?")) return;
+    }
+    setPlanMode(false);
+    setPlan(null);
+    planRef.current = null;
+    setPlanPublishResults(null);
+    setPlanSaveState("idle");
+    setPlanSaveError(null);
+    setPlanSavedAt(null);
+    if (normalModelRef.current) {
+      setModel(normalModelRef.current);
+    }
+    setStatus("Exited Plan mode");
+    setHint("Enter JQL and press Pull to load Jira tasks.");
+  }
+
+  async function onPublishPlanConfirm() {
+    if (!plan || !planRef.current) return;
+    setPublishBusy(true);
+    setError(null);
+    setStatus("Publishing plan to Jira…");
+    try {
+      const current = ganttModelToPlan(modelRef.current, planRef.current);
+      current.updatedBy = viewerEmail;
+      const { plan: saved } = await store.savePlan(current, planRevisionRef.current);
+      planRef.current = saved;
+      planRevisionRef.current = saved.revision;
+      const result = await store.publishPlan(saved);
+      planRef.current = result.plan;
+      planRevisionRef.current = result.plan.revision;
+      setPlan(result.plan);
+      setPlanPublishResults(result.results);
+      setPublishDialogOpen(false);
+      const ok = result.results.filter((r) => r.status === "ok").length;
+      setStatus(
+        result.allOk
+          ? `Plan published · ${ok} item(s) created in Jira`
+          : `Publish incomplete · ${ok} ok — retry to finish`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      setStatus("Publish failed");
+    } finally {
+      setPublishBusy(false);
+    }
+  }
 
   function addCustomOffDay(date: string, name?: string) {
     updateModel((prev) => {
@@ -798,8 +1146,11 @@ export default function App() {
     if (drafts) parts.push(`${drafts} draft task(s)`);
     if (qaDirty) parts.push(`${qaDirty} QA edit(s)`);
     if (qaDeletes) parts.push(`${qaDeletes} queued QA delete(s)`);
-    if (!window.confirm(`Discard ${parts.join(" and ")}?`)) return;
+    setClearConfirmation(`Discard ${parts.join(" and ")}?`);
+  }
 
+  function confirmClearChanges() {
+    setClearConfirmation(null);
     const restoreDeletes = pendingQaDeletes;
     pendingQaDeletesRef.current = [];
     setPendingQaDeletes([]);
@@ -871,7 +1222,7 @@ export default function App() {
     );
     try {
       const { results } = dirtyTasks.length
-        ? await pushGantt(
+        ? await store.push(
             dirtyTasks.map((t) => {
               let storyPoints: number | null | undefined;
               if (t.pendingCreate) {
@@ -913,7 +1264,7 @@ export default function App() {
       const deletedQaIds = new Set<string>();
       for (const { previousLinkedKeys, ...item } of dirtyQaItems) {
         try {
-          await saveQaItem(item, previousLinkedKeys);
+          await store.saveQaItem(item, previousLinkedKeys);
           savedQaIds.add(item.id);
           qaOk += 1;
         } catch (err) {
@@ -924,7 +1275,7 @@ export default function App() {
       }
       for (const del of pendingQaDeletes) {
         try {
-          await deleteQaItem(del.id, del.linkedIssueKeys);
+          await store.deleteQaItem(del.id, del.linkedIssueKeys);
           deletedQaIds.add(del.id);
           qaOk += 1;
         } catch (err) {
@@ -1024,7 +1375,7 @@ export default function App() {
               const start = patch.start !== undefined ? patch.start : t.start;
               const due =
                 start != null
-                  ? dueFromStartDuration(start, durationDays, prev.showHolidays)
+                  ? dueFromStartDuration(start, durationDays, workCalendarFrom(prev))
                   : patch.due !== undefined
                     ? patch.due
                     : t.due;
@@ -1061,7 +1412,7 @@ export default function App() {
                 next.due = dueFromStartDuration(
                   next.start,
                   next.durationDays,
-                  prev.showHolidays,
+                  workCalendarFrom(prev),
                 );
               }
             }
@@ -1076,7 +1427,7 @@ export default function App() {
                   next.due = dueFromStartDuration(
                     next.start,
                     next.durationDays,
-                    prev.showHolidays,
+                    workCalendarFrom(prev),
                   );
                 }
               }
@@ -1102,7 +1453,45 @@ export default function App() {
     start: string;
     durationDays: number;
   }) {
-    const due = dueFromStartDuration(input.start, input.durationDays, model.showHolidays);
+    const due = dueFromStartDuration(input.start, input.durationDays, workCalendarFrom(model));
+    if (planMode) {
+      const task: GanttTask = {
+        id: newPlanTaskId(),
+        friendlyId: "PLAN",
+        title: input.title,
+        owner: "—",
+        start: input.start,
+        due,
+        durationDays: input.durationDays,
+        estDays: Math.max(1, Math.round(input.durationDays || 1)),
+        resourceIds: [],
+        pulledResourceIds: [],
+        status: "To Do",
+        pulledStatus: "To Do",
+        pulledStart: input.start,
+        pulledDue: due,
+        pulledDurationDays: input.durationDays,
+        pulledEstDays: Math.max(1, Math.round(input.durationDays || 1)),
+        transitionId: null,
+        assignee: null,
+        blockedBy: [],
+        jiraUpdated: "",
+        planOnly: true,
+        pendingCreate: true,
+        createEpicId: input.epicId,
+        dirty: false,
+      };
+      updateModel((prev) => ({
+        ...prev,
+        milestones: prev.milestones.map((m) =>
+          m.id === input.epicId
+            ? { ...m, collapsed: false, tasks: [...m.tasks, task] }
+            : m,
+        ),
+      }));
+      setStatus("Planned task added · autosaving to draft ticket");
+      return;
+    }
     const draft = {
       id: newDraftTaskId(),
       epicId: input.epicId,
@@ -1123,6 +1512,53 @@ export default function App() {
     setStatus(`Draft task added · Push to create in Jira`);
   }
 
+  function onAddPlanEpic(title: string) {
+    const id = newPlanEpicId();
+    updateModel((prev) => ({
+      ...prev,
+      milestones: [
+        ...prev.milestones,
+        {
+          id,
+          title,
+          color: DEFAULT_COLORS[prev.milestones.length % DEFAULT_COLORS.length],
+          collapsed: false,
+          planOnly: true,
+          tasks: [],
+        },
+      ],
+    }));
+    setEditPlanEpicId(null);
+    setStatus(`Planned epic added · autosaving to draft ticket`);
+  }
+
+  function onEditPlanEpic(milestoneId: string) {
+    setEditPlanEpicId(milestoneId);
+    setAddPlanEpicOpen(true);
+  }
+
+  function onSavePlanEpic(title: string) {
+    if (editPlanEpicId) {
+      updateModel((prev) => ({
+        ...prev,
+        milestones: prev.milestones.map((m) =>
+          m.id === editPlanEpicId ? { ...m, title } : m,
+        ),
+      }));
+      setStatus("Planned epic updated");
+      return;
+    }
+    onAddPlanEpic(title);
+  }
+
+  function onDeletePlanEpic(milestoneId: string) {
+    updateModel((prev) => ({
+      ...prev,
+      milestones: prev.milestones.filter((m) => m.id !== milestoneId),
+    }));
+    setStatus("Planned epic removed");
+  }
+
   function onDeleteDraftTask(taskId: string) {
     updateModel((prev) => ({
       ...prev,
@@ -1131,24 +1567,56 @@ export default function App() {
         tasks: m.tasks.filter((t) => t.id !== taskId),
       })),
     }));
-    setStatus("Draft task removed");
+    setStatus(planMode ? "Planned task removed" : "Draft task removed");
   }
 
-  function onAddLocalMilestone(input: { title: string; start: string }) {
+  function onSaveLocalMilestone(input: {
+    id?: string;
+    title: string;
+    start: string;
+    linkedEpicKeys: string[];
+  }) {
     const marker = {
-      id: newLocalMarkerId(),
+      id: input.id || newLocalMarkerId(),
       title: input.title,
       start: input.start,
+      linkedEpicKeys: [...input.linkedEpicKeys],
     };
     const row = localMarkerToMilestone(marker);
-    updateModel((prev) => ({
-      ...prev,
-      milestones: [...prev.milestones, row],
-    }));
-    setStatus(`Milestone added · ${input.title}`);
+    updateModel((prev) => {
+      if (input.id) {
+        return {
+          ...prev,
+          milestones: prev.milestones.map((milestone) =>
+            milestone.id === input.id ? row : milestone,
+          ),
+        };
+      }
+      return { ...prev, milestones: [...prev.milestones, row] };
+    });
+    setEditLocalMilestone(null);
+    setStatus(`Milestone ${input.id ? "updated" : "added"} · ${input.title}`);
+  }
+
+  function onEditLocalMilestone(milestoneId: string) {
+    const marker = collectLocalMarkers(model).find((item) => item.id === milestoneId);
+    if (!marker) return;
+    setEditLocalMilestone(marker);
+    setAddMsOpen(true);
   }
 
   function onDeleteLocalMilestone(milestoneId: string) {
+    if (planMode && normalModelRef.current) {
+      const next = {
+        ...normalModelRef.current,
+        milestones: normalModelRef.current.milestones.filter((m) => m.id !== milestoneId),
+      };
+      normalModelRef.current = next;
+      void persistLocal(prefsFromModel(next, jql, pendingQaDeletesRef.current));
+      persistCache(next, scrollRef.current);
+      setStatus("Milestone removed from standard timeline");
+      return;
+    }
     updateModel((prev) => ({
       ...prev,
       milestones: prev.milestones.filter((m) => m.id !== milestoneId),
@@ -1180,7 +1648,7 @@ export default function App() {
       durationDays: Math.max(1, input.durationDays),
       linkedIssueKeys: [...input.linkedIssueKeys],
     };
-    const row = qaItemToMilestone(item, model, model.showHolidays, {
+    const row = qaItemToMilestone(item, model, workCalendarFrom(model), {
       dirty: true,
       pulledLinkedIssueKeys: prevTask?.pulledLinkedIssueKeys,
       pulledStart: prevTask?.pulledStart,
@@ -1203,7 +1671,9 @@ export default function App() {
   }
 
   function onDeleteQaItem(milestoneId: string) {
-    const milestone = model.milestones.find((m) => m.id === milestoneId);
+    const sourceModel =
+      planMode && normalModelRef.current ? normalModelRef.current : model;
+    const milestone = sourceModel.milestones.find((m) => m.id === milestoneId);
     const prevTask = milestone?.tasks.find((t) => t.id === milestoneId);
     const wasSynced = !!(prevTask?.pulledLinkedIssueKeys?.length);
 
@@ -1224,10 +1694,20 @@ export default function App() {
     pendingQaDeletesRef.current = nextPending;
     setPendingQaDeletes(nextPending);
 
-    updateModel((prev) => ({
-      ...prev,
-      milestones: prev.milestones.filter((m) => m.id !== milestoneId),
-    }));
+    if (planMode && normalModelRef.current) {
+      const next = {
+        ...normalModelRef.current,
+        milestones: normalModelRef.current.milestones.filter((m) => m.id !== milestoneId),
+      };
+      normalModelRef.current = next;
+      void persistLocal(prefsFromModel(next, jql, nextPending));
+      persistCache(next, scrollRef.current);
+    } else {
+      updateModel((prev) => ({
+        ...prev,
+        milestones: prev.milestones.filter((m) => m.id !== milestoneId),
+      }));
+    }
     if (wasSynced) {
       setStatus("QA item removed — Push to delete from Jira");
       return;
@@ -1241,6 +1721,40 @@ export default function App() {
     setEditQaItem(item);
     setAddQaOpen(item.kind);
   }
+
+  const standardTimelineDeletableItems = ((): DeletableTimelineItem[] => {
+    if (!planMode || !normalModelRef.current) return [];
+    const items: DeletableTimelineItem[] = [];
+    for (const milestone of normalModelRef.current.milestones) {
+      if (isQaMilestone(milestone)) {
+        const task =
+          milestone.tasks.find((candidate) => candidate.id === milestone.id) ||
+          milestone.tasks[0];
+        const kind = milestone.qaKind || "integration";
+        const synced = !!task?.pulledLinkedIssueKeys?.length;
+        items.push({
+          id: milestone.id,
+          label: milestone.title,
+          kind,
+          confirmMessage: synced
+            ? `Remove ${kind === "e2e" ? "E2E flow" : "Integration test"} “${milestone.title}” from the standard timeline? Push after leaving Plan mode to delete it from Jira.`
+            : `Remove ${kind === "e2e" ? "E2E flow" : "Integration test"} “${milestone.title}” from the standard timeline?`,
+          onDelete: () => onDeleteQaItem(milestone.id),
+        });
+        continue;
+      }
+      if (milestone.localOnly && !milestone.qaKind) {
+        items.push({
+          id: milestone.id,
+          label: milestone.title,
+          kind: "milestone",
+          confirmMessage: `Remove local milestone “${milestone.title}” from the standard timeline?`,
+          onDelete: () => onDeleteLocalMilestone(milestone.id),
+        });
+      }
+    }
+    return items;
+  })();
 
   function onStatusEdit(
     taskId: string,
@@ -1497,66 +2011,179 @@ export default function App() {
                 </>
               )}
             </button>
-            {health != null && !health.ok && (
-              <a
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={!model.milestones.length}
+              onClick={() => setPreviewOpen(true)}
+              title="Open a clean, screenshot-ready Gantt view"
+            >
+              Preview
+            </button>
+          </div>
+          <div className="app-header-actions-row">
+            {health != null && !health.ok && mode === 'datadog' && (
+              <span
                 className="gantt-btn token-btn"
-                href="https://id.atlassian.com/manage-profile/security/api-tokens"
-                target="_blank"
-                rel="noreferrer"
-                title="Create a Jira API token, then add it to .env as JIRA_API_TOKEN"
+                title="Jira uses the Datadog Jira integration — ask an admin to verify the connection"
               >
-                Get Jira token
-              </a>
+                Jira setup
+              </span>
             )}
             <span className={`health ${health?.ok ? "ok" : "bad"}`}>
               {health == null ? "…" : health.ok ? "Jira connected" : "Jira offline"}
             </span>
           </div>
-          <button
-            type="button"
-            className="gantt-btn"
-            disabled={!model.milestones.length}
-            onClick={() => setPreviewOpen(true)}
-            title="Open a clean, screenshot-ready Gantt view"
-          >
-            Preview
-          </button>
         </div>
-        {health?.ok && health.displayName && (
-          <span
-            className="app-profile"
-            style={{ background: colorForName(health.displayName) }}
-            title={health.displayName}
-            aria-label={`Signed in as ${health.displayName}`}
-          >
-            {initialsFromName(health.displayName)}
-          </span>
-        )}
+        <span
+          className="app-profile"
+          style={{ background: colorForName(profileName) }}
+          title={`${profileName} (${viewer.email})`}
+          aria-label={`Signed in as ${profileName}`}
+        >
+          {initialsFromName(profileName)}
+        </span>
       </header>
 
+      {planMode && plan ? (
+        <div className="pg-plan-banner">
+          <div className="pg-plan-banner-main">
+            <div className="pg-plan-banner-title">
+              <strong>Plan mode</strong>
+              <span className="pg-plan-beta-badge">Beta — not fully tested</span>
+              <span className="pg-plan-storage-note">
+                Your draft plan is stored on this Jira ticket — not in the browser.
+              </span>
+            </div>
+            <div className="pg-plan-ticket-row">
+              <span className="pg-plan-ticket-label">Jira draft ticket</span>
+              <a
+                className="pg-plan-ticket-link"
+                href={`${jiraBaseUrl}/browse/${plan.draftTicketKey}`}
+                target="_blank"
+                rel="noreferrer"
+                title="Open the Jira ticket where this plan is saved"
+              >
+                {plan.draftTicketKey}
+              </a>
+              {plan.publishState === "published" ? (
+                <span className="pg-plan-published-tag">Published</span>
+              ) : null}
+            </div>
+            <div
+              className={`pg-plan-save-badge pg-plan-save-badge-${planSaveState}`}
+              role="status"
+              aria-live="polite"
+            >
+              {planSaveState === "saving" ? (
+                <>
+                  <span className="pg-spinner pg-spinner-inline" aria-hidden />
+                  Saving plan to {plan.draftTicketKey}…
+                </>
+              ) : planSaveState === "saved" ? (
+                <>
+                  <span className="pg-plan-save-icon" aria-hidden>✓</span>
+                  Saved on Jira ticket {plan.draftTicketKey}
+                  {formatPlanSavedAt(planSavedAt || plan.updatedAt)
+                    ? ` · ${formatPlanSavedAt(planSavedAt || plan.updatedAt)}`
+                    : ""}
+                </>
+              ) : planSaveState === "error" ? (
+                <>
+                  <span className="pg-plan-save-icon pg-plan-save-icon-error" aria-hidden>!</span>
+                  Could not save to {plan.draftTicketKey}
+                </>
+              ) : null}
+            </div>
+            {planSaveError ? <p className="pg-plan-error">{planSaveError}</p> : null}
+          </div>
+          <div className="pg-plan-banner-actions">
+            <button
+              type="button"
+              className="gantt-btn primary"
+              disabled={publishBusy}
+              onClick={() => {
+                setEditPlanEpicId(null);
+                setAddPlanEpicOpen(true);
+              }}
+            >
+              Add epic
+            </button>
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={publishBusy || !model.milestones.some((m) => m.planOnly)}
+              onClick={() => setAddTaskOpen(true)}
+            >
+              Add task
+            </button>
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={publishBusy || planSaveState === "saving"}
+              onClick={onSavePlan}
+              title={`Save plan to Jira ticket ${plan.draftTicketKey}`}
+            >
+              {planSaveState === "saving" ? (
+                <>
+                  <span className="pg-spinner pg-spinner-inline" aria-hidden />
+                  Saving…
+                </>
+              ) : (
+                "Save"
+              )}
+            </button>
+            <button
+              type="button"
+              className="gantt-btn primary warn"
+              disabled={publishBusy || plan.publishState === "published"}
+              onClick={() => setPublishDialogOpen(true)}
+              title="Create all planned epics and tasks in Jira"
+            >
+              Publish plan
+              {plan ? ` (${countPlanItems(plan).epics} epics · ${countPlanItems(plan).tasks} tasks)` : ""}
+            </button>
+            <button type="button" className="gantt-btn" onClick={exitPlanMode}>
+              Exit Plan mode
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="pg-toolbar">
-        <select
-          className="pg-jql-select"
-          value={activeSavedJqlId || ""}
-          onChange={(e) => onSelectSavedJql(e.target.value)}
-          title="Switch between your saved JQL queries"
-          aria-label="Saved JQL"
+        {!planMode ? (
+          <>
+            <select
+              className="pg-jql-select"
+              value={activeSavedJqlId || ""}
+              onChange={(e) => onSelectSavedJql(e.target.value)}
+              title="Switch between your saved JQL queries"
+              aria-label="Saved JQL"
+            >
+              <option value="">Saved JQL…</option>
+              {savedJqls.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <input
+              className="pg-jql"
+              value={jql}
+              onChange={(e) => onJqlChange(e.target.value)}
+              placeholder='JQL — e.g. project = SBT AND parent = SBT-61018'
+              spellCheck={false}
+              title="Saved to your preferences as you type"
+            />
+        <button
+          type="button"
+          className="gantt-btn"
+          disabled={!jql.trim()}
+          onClick={() => setShareJqlOpen(true)}
+          title="Copy a Datadog link with this JQL pre-filled"
         >
-          <option value="">Saved JQL…</option>
-          {savedJqls.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
-        <input
-          className="pg-jql"
-          value={jql}
-          onChange={(e) => onJqlChange(e.target.value)}
-          placeholder='JQL — e.g. project = SBT AND parent = SBT-61018'
-          spellCheck={false}
-          title="Saved to preferences.json as you type"
-        />
+          Share
+        </button>
         <button
           type="button"
           className="gantt-btn pg-jql-copy"
@@ -1565,133 +2192,123 @@ export default function App() {
           title="Copy JQL to clipboard"
           aria-label="Copy JQL to clipboard"
         >
-          <svg className="pg-jql-copy-icon" viewBox="0 0 24 24" aria-hidden>
-            <path
-              fill="currentColor"
-              d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"
-            />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="gantt-btn"
-          disabled={!jql.trim()}
-          onClick={onSaveJql}
-          title="Save the current JQL under a name for quick reuse"
-        >
-          Save JQL
-        </button>
-        <button
-          type="button"
-          className="gantt-btn"
-          disabled={!activeSavedJqlId}
-          onClick={onRemoveSavedJql}
-          title="Remove the selected saved JQL"
-        >
-          Remove
-        </button>
-        <button
-          type="button"
-          className={`gantt-btn primary${busy === "pull" ? " is-busy" : ""}`}
-          disabled={busy !== null || !jql.trim()}
-          onClick={() => void onPull()}
-        >
-          {busy === "pull" ? (
-            <>
-              <span className="pg-spinner pg-spinner-inline" aria-hidden />
-              Pulling…
-            </>
-          ) : (
-            "Pull"
-          )}
-        </button>
-        <button
-          type="button"
-          className={`gantt-btn${pushPendingCount ? " warn" : ""}${busy === "push" ? " is-busy" : ""}`}
-          disabled={busy !== null || pushPendingCount === 0 || historyReadOnly}
-          onClick={() => void onPush()}
-          title="Create draft tasks in Jira and write Start/Due/Story Points (from Dur)/status/assignee/QA items. Done transitions also log actual time."
-        >
-          {busy === "push" ? (
-            <>
-              <span className="pg-spinner pg-spinner-inline" aria-hidden />
-              Pushing…
-            </>
-          ) : (
-            `Push${pushPendingCount ? ` (${pushPendingCount})` : ""}`
-          )}
-        </button>
-        <button
-          type="button"
-          className="gantt-btn"
-          disabled={busy !== null || pushPendingCount === 0}
-          onClick={onClearChanges}
-          title="Discard unpushed ticket edits, QA changes, and draft tasks (keeps local milestones)"
-        >
-          Clear
-        </button>
-        <button
-          type="button"
-          className="gantt-btn"
-          onClick={() => setOptionsOpen(true)}
-          title="Project start, holidays, off days, and prerequisites"
-        >
-          Options
-        </button>
-        <label
-          className="pg-compare-toggle"
-          title="Reconstruct schedules from Jira ticket history"
-        >
-          <input
-            type="checkbox"
-            checked={compareEnabled}
-            onChange={(e) => setCompareEnabled(e.target.checked)}
-            disabled={!model.milestones.length}
-          />
-          History
-        </label>
-        <input
-          type="date"
-          className="pg-compare-date"
-          value={compareDate}
-          max={formatYmd(todayLocal())}
-          disabled={!compareEnabled || !model.milestones.length}
-          onChange={(e) => {
-            if (e.target.value) setCompareDate(e.target.value);
-          }}
-          title="Past date to reconstruct from Jira changelog"
-          aria-label="History date"
-        />
-        <select
-          className="pg-history-mode"
-          value={historyViewMode}
-          disabled={!compareEnabled || !model.milestones.length}
-          onChange={(e) => setHistoryViewMode(e.target.value as HistoryViewMode)}
-          title="Overlay shows ghosts on today's board; As of date replaces bars with the historical schedule"
-          aria-label="History view mode"
-        >
-          <option value="asOf">As of date — full board</option>
-          <option value="overlay">Overlay — ghosts on today</option>
-        </select>
-        {compareEnabled && compareStats && !historyLoading ? (
-          <span className="pg-compare-stats" title="Reconstructed from Jira changelog">
-            {historyViewMode === "overlay" ? "Comparing" : "Viewing"} {formatCompareLabel(compareDate)}
-            {historyViewMode === "overlay" && compareStats.moved
-              ? ` · ${compareStats.moved} bars moved`
-              : historyViewMode === "asOf" && compareStats.scheduled
-                ? ` · ${compareStats.scheduled} scheduled`
-                : ""}
-            {compareStats.notCreated ? ` · ${compareStats.notCreated} not yet created` : ""}
-          </span>
+              <svg className="pg-jql-copy-icon" viewBox="0 0 24 24" aria-hidden>
+                <path
+                  fill="currentColor"
+                  d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={!jql.trim()}
+              onClick={onSaveJql}
+              title="Save the current JQL under a name for quick reuse"
+            >
+              Save JQL
+            </button>
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={!activeSavedJqlId}
+              onClick={onRemoveSavedJql}
+              title="Remove the selected saved JQL"
+            >
+              Remove
+            </button>
+            <button
+              type="button"
+              className={`gantt-btn primary${busy === "pull" ? " is-busy" : ""}`}
+              disabled={busy !== null || !jql.trim()}
+              onClick={() => void onPull()}
+            >
+              {busy === "pull" ? (
+                <>
+                  <span className="pg-spinner pg-spinner-inline" aria-hidden />
+                  Pulling…
+                </>
+              ) : (
+                "Pull"
+              )}
+            </button>
+            <button
+              type="button"
+              className={`gantt-btn${pushPendingCount ? " warn" : ""}${busy === "push" ? " is-busy" : ""}`}
+              disabled={busy !== null || pushPendingCount === 0 || historyReadOnly}
+              onClick={() => void onPush()}
+              title="Create draft tasks in Jira and write Start/Due/Story Points (from Dur)/status/assignee/QA items. Done transitions also log actual time."
+            >
+              {busy === "push" ? (
+                <>
+                  <span className="pg-spinner pg-spinner-inline" aria-hidden />
+                  Pushing…
+                </>
+              ) : (
+                `Push${pushPendingCount ? ` (${pushPendingCount})` : ""}`
+              )}
+            </button>
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={busy !== null || pushPendingCount === 0}
+              onClick={onClearChanges}
+              title="Discard unpushed ticket edits, QA changes, and draft tasks (keeps local milestones)"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              className="gantt-btn"
+              disabled={busy !== null}
+              onClick={() => {
+                setPlanDialogError(null);
+                setPlanDialogOpen(true);
+              }}
+              title="Beta — not fully tested. Plan epics and tasks on a draft Jira ticket before creating them."
+            >
+              Plan mode
+              <span className="pg-plan-beta-badge pg-plan-beta-badge-sm">Beta</span>
+            </button>
+          </>
         ) : null}
+        <HistoryMenu
+          onOpenOptions={() => setOptionsOpen(true)}
+          onOpenGuide={() => setGuideOpen(true)}
+          showHistory={!planMode}
+          enabled={compareEnabled}
+          onEnabledChange={setCompareEnabled}
+          date={compareDate}
+          maxDate={formatYmd(todayLocal())}
+          onDateChange={setCompareDate}
+          viewMode={historyViewMode}
+          onViewModeChange={setHistoryViewMode}
+          disabled={!model.milestones.length}
+          loading={historyLoading}
+          statsLabel={historyStatsLabel}
+        />
         <p className="hint">{hint}</p>
-        <span className={`status${dirtyTasks.length ? " dirty" : ""}`}>{status}</span>
-        {prefsSavedAt && (
-          <span className="status" title="Written to preferences.json">
+        <span className={`status${dirtyTasks.length && !planMode ? " dirty" : ""}`}>
+          {status}
+        </span>
+        {prefsSavedAt && !planMode && (
+          <span className="status" title="Preferences saved for your account">
             Prefs saved {prefsSavedAt}
           </span>
         )}
       </div>
+
+      {model.milestones.length ? (
+        <GanttFilters
+          value={filters}
+          resources={boardModel.resources}
+          milestones={boardModel.milestones}
+          statuses={filterStatuses}
+          shownCount={shownFilterItems}
+          totalCount={totalFilterItems}
+          onChange={setFilters}
+        />
+      ) : null}
 
       {error && (
         <div className="push-results">
@@ -1708,13 +2325,29 @@ export default function App() {
           ))}
         </ul>
       )}
+      {planPublishResults && (
+        <ul className="push-results">
+          {planPublishResults.map((r) => (
+            <li key={`${r.planId}-${r.kind}`} className={r.status}>
+              {r.jiraKey || r.planId}: {r.status}
+              {r.message ? ` — ${r.message}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <GanttBoard
-        model={boardModel}
+        model={filteredBoardModel}
         jiraBaseUrl={jiraBaseUrl}
+        additionalDeletableItems={standardTimelineDeletableItems}
         initialScroll={scroll}
         preview={previewOpen}
-        historyReadOnly={historyReadOnly}
+        emptyMessage={
+          hasActiveGanttFilters(filters)
+            ? "No items match the current filters. Change or clear a filter to see the board."
+            : undefined
+        }
+        historyReadOnly={historyReadOnly || publishBusy}
         historyViewMode={compareEnabled ? historyViewMode : null}
         historyViewLabel={historyViewLabel}
         loading={busy || (historyLoading ? "history" : null)}
@@ -1743,6 +2376,7 @@ export default function App() {
         onToggleMarker={onToggleMarker}
         onToggleHidden={onToggleHidden}
         onToggleHiddenFolder={onToggleHiddenFolder}
+        onEditLocalMilestone={onEditLocalMilestone}
         onDeleteLocalMilestone={onDeleteLocalMilestone}
         onDeleteQaItem={onDeleteQaItem}
         onEditQaItem={onEditQaItem}
@@ -1753,31 +2387,110 @@ export default function App() {
           persistCache(modelRef.current, next);
         }}
         onCollapseOrExpandAll={onCollapseOrExpandAll}
+        allEpicsCollapsed={allEpicsCollapsed}
         onAddTask={() => setAddTaskOpen(true)}
-        onAddMilestone={() => setAddMsOpen(true)}
-        onAddIntegrationTest={() => {
-          setEditQaItem(null);
-          setAddQaOpen("integration");
-        }}
-        onAddE2eFlow={() => {
-          setEditQaItem(null);
-          setAddQaOpen("e2e");
-        }}
+        onAddMilestone={
+          planMode
+            ? undefined
+            : () => {
+                setEditLocalMilestone(null);
+                setAddMsOpen(true);
+              }
+        }
+        onAddIntegrationTest={
+          planMode
+            ? undefined
+            : () => {
+                setEditQaItem(null);
+                setAddQaOpen("integration");
+              }
+        }
+        onAddE2eFlow={
+          planMode
+            ? undefined
+            : () => {
+                setEditQaItem(null);
+                setAddQaOpen("e2e");
+              }
+        }
+        planMode={planMode}
+        onAddEpic={
+          planMode
+            ? () => {
+                setEditPlanEpicId(null);
+                setAddPlanEpicOpen(true);
+              }
+            : undefined
+        }
+        onEditEpic={planMode ? onEditPlanEpic : undefined}
+        onDeletePlanEpic={planMode ? onDeletePlanEpic : undefined}
       />
 
       <AddTaskDialog
         open={addTaskOpen}
-        epics={model.milestones.filter((m) => !m.localOnly)}
+        epics={
+          planMode
+            ? model.milestones.filter((m) => m.planOnly)
+            : model.milestones.filter((m) => !m.localOnly)
+        }
         defaultDate={model.projectStart}
+        planMode={planMode}
         onClose={() => setAddTaskOpen(false)}
         onAdd={onAddDraftTask}
+      />
+
+      <AddPlanEpicDialog
+        open={addPlanEpicOpen}
+        editingTitle={
+          editPlanEpicId
+            ? model.milestones.find((m) => m.id === editPlanEpicId)?.title || ""
+            : null
+        }
+        onClose={() => {
+          setAddPlanEpicOpen(false);
+          setEditPlanEpicId(null);
+        }}
+        onSave={onSavePlanEpic}
+      />
+
+      <PlanModeDialog
+        open={planDialogOpen}
+        jiraBaseUrl={jiraBaseUrl}
+        busy={planDialogBusy}
+        error={planDialogError}
+        savedDraftTicket={savedPlanDraftTicket}
+        onClose={() => {
+          if (planDialogBusy) return;
+          setPlanDialogOpen(false);
+          setPlanDialogError(null);
+        }}
+        onContinue={onPlanModeContinue}
+      />
+
+      <PublishPlanDialog
+        open={publishDialogOpen}
+        plan={plan}
+        busy={publishBusy}
+        onClose={() => {
+          if (publishBusy) return;
+          setPublishDialogOpen(false);
+        }}
+        onConfirm={() => void onPublishPlanConfirm()}
       />
 
       <AddMilestoneDialog
         open={addMsOpen}
         defaultDate={model.projectStart}
-        onClose={() => setAddMsOpen(false)}
-        onAdd={onAddLocalMilestone}
+        epics={model.milestones
+          .filter((milestone) => !milestone.localOnly && !milestone.planOnly)
+          .map((milestone) => ({ id: milestone.id, title: milestone.title }))}
+        editing={editLocalMilestone}
+        onClose={() => {
+          setAddMsOpen(false);
+          setEditLocalMilestone(null);
+        }}
+        onDelete={onDeleteLocalMilestone}
+        onSave={onSaveLocalMilestone}
       />
 
       <AddQaItemDialog
@@ -1790,6 +2503,7 @@ export default function App() {
           setAddQaOpen(null);
           setEditQaItem(null);
         }}
+        onDelete={onDeleteQaItem}
         onSave={onSaveQaItem}
       />
 
@@ -1803,11 +2517,31 @@ export default function App() {
         onSave={commitSaveJql}
       />
 
+      <ShareJqlDialog
+        open={shareJqlOpen}
+        jql={jql}
+        onClose={() => setShareJqlOpen(false)}
+      />
+
+      {clearConfirmation ? (
+        <ConfirmDialog
+          title="Clear local changes?"
+          message={clearConfirmation}
+          confirmLabel="Clear changes"
+          onCancel={() => setClearConfirmation(null)}
+          onConfirm={confirmClearChanges}
+        />
+      ) : null}
+
       <ProjectOptionsPanel
         open={optionsOpen}
         projectStart={model.projectStart}
         showHolidays={model.showHolidays}
+        showPolishHolidays={model.showPolishHolidays === true}
+        workingWeekdays={model.workingWeekdays || [0, 1, 2, 3, 4]}
         showDeps={model.showDeps}
+        showSprints={model.showSprints !== false}
+        sprintCount={model.sprints?.length ?? 0}
         customNonWorkingDays={model.customNonWorkingDays || []}
         onClose={() => setOptionsOpen(false)}
         onProjectStartChange={(value) =>
@@ -1816,12 +2550,23 @@ export default function App() {
         onShowHolidaysChange={(value) =>
           updateModel((prev) => ({ ...prev, showHolidays: value }))
         }
+        onShowPolishHolidaysChange={(value) =>
+          updateModel((prev) => ({ ...prev, showPolishHolidays: value }))
+        }
+        onWorkingWeekdaysChange={(value) =>
+          updateModel((prev) => ({ ...prev, workingWeekdays: value }))
+        }
         onShowDepsChange={(value) =>
           updateModel((prev) => ({ ...prev, showDeps: value }))
+        }
+        onShowSprintsChange={(value) =>
+          updateModel((prev) => ({ ...prev, showSprints: value }))
         }
         onAddOffDay={addCustomOffDay}
         onRemoveOffDay={removeCustomOffDay}
       />
+
+      <AppGuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
 
       <div className="pg-legend">
         <span>
@@ -1837,10 +2582,10 @@ export default function App() {
           <i className="m-over" /> Overbooked (&gt; 8h)
         </span>
         <span>
-          <i className="m-off" /> Off (Fri–Sat)
+          <i className="m-off" /> Off (non-working)
         </span>
         <span>
-          <i className="m-hol" /> IL holiday
+          <i className="m-hol" /> Holiday
         </span>
         <span>
           <i className="m-dep" /> Prerequisite
@@ -1848,7 +2593,7 @@ export default function App() {
         <span>Push writes schedule, status, assignee, and QA items to Jira</span>
       </div>
 
-      <AppFooter />
+      <AppFooter onOpenGuide={() => setGuideOpen(true)} />
     </div>
   );
 }

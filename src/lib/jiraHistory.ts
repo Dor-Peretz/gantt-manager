@@ -6,7 +6,7 @@ import type {
   IssueChangelog,
 } from "./types";
 import { parseStoryPoints, scheduleFromFields } from "./jiraSchedule";
-import { formatYmd, parseYmd } from "./workdays";
+import { formatYmd, parseYmd, type WorkCalendar } from "./workdays";
 
 function endOfLocalDay(ymd: string): Date {
   const d = parseYmd(ymd);
@@ -57,12 +57,12 @@ export function rewindTaskSchedule(
   changelog: IssueChangelog | undefined,
   asOfYmd: string,
   fieldMap: HistoryFieldMap,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
 ): HistoricalSchedule | null {
   if (task.localOnly || task.pendingCreate) return null;
 
   if (!changelog) {
-    const schedule = scheduleFromFields(task.start, task.due, task.estDays, holidaysOn);
+    const schedule = scheduleFromFields(task.start, task.due, task.estDays, cal);
     return {
       start: schedule.start,
       due: schedule.due,
@@ -120,7 +120,7 @@ export function rewindTaskSchedule(
     }
   }
 
-  const schedule = scheduleFromFields(start, due, estDays, holidaysOn);
+  const schedule = scheduleFromFields(start, due, estDays, cal);
 
   return {
     start: schedule.start,
@@ -148,13 +148,13 @@ export function buildHistoryOverlay(
   changelogs: Map<string, IssueChangelog>,
   asOfYmd: string,
   fieldMap: HistoryFieldMap,
-  holidaysOn: boolean,
+  cal: WorkCalendar,
 ): Map<string, HistoricalSchedule | null> {
   const overlay = new Map<string, HistoricalSchedule | null>();
   for (const task of tasks) {
     overlay.set(
       task.id,
-      rewindTaskSchedule(task, changelogs.get(task.id), asOfYmd, fieldMap, holidaysOn),
+      rewindTaskSchedule(task, changelogs.get(task.id), asOfYmd, fieldMap, cal),
     );
   }
   return overlay;

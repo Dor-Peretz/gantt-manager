@@ -5,7 +5,7 @@ import { qaKindLabel } from "../lib/qaItems";
 export interface DeletableTimelineItem {
   id: string;
   label: string;
-  kind: "milestone" | "integration" | "e2e" | "draft";
+  kind: "milestone" | "integration" | "e2e" | "draft" | "plan-epic";
   confirmMessage: string;
   onDelete: () => void;
 }
@@ -18,6 +18,9 @@ interface Props {
   onAddMilestone: () => void;
   onAddIntegrationTest: () => void;
   onAddE2eFlow: () => void;
+  /** Plan mode — only epic + task drafts, no QA or local milestones. */
+  planMode?: boolean;
+  onAddEpic?: () => void;
 }
 
 interface MenuPos {
@@ -28,6 +31,7 @@ interface MenuPos {
 function deleteKindLabel(kind: DeletableTimelineItem["kind"]): string {
   if (kind === "milestone") return "Milestone";
   if (kind === "draft") return "Draft task";
+  if (kind === "plan-epic") return "Planned epic";
   return qaKindLabel(kind);
 }
 
@@ -39,6 +43,8 @@ export function AddTimelineMenu({
   onAddMilestone,
   onAddIntegrationTest,
   onAddE2eFlow,
+  planMode = false,
+  onAddEpic,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DeletableTimelineItem | null>(null);
@@ -150,60 +156,82 @@ export function AddTimelineMenu({
             }
           >
             <div className="pg-assign-hint">Add to timeline</div>
+            {planMode && onAddEpic ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="pg-add-menu-item"
+                title="Add a planned epic — published later to Jira"
+                onClick={() => pick(onAddEpic)}
+              >
+                <span className="pg-add-menu-item-label">Epic</span>
+                <span className="pg-add-menu-item-meta">Plan only</span>
+              </button>
+            ) : null}
             <button
               type="button"
               role="menuitem"
               className="pg-add-menu-item"
               disabled={!hasEpics}
-              title="Add a draft task under an epic — Push creates it in Jira"
+              title={
+                planMode
+                  ? "Add a planned task under an epic"
+                  : "Add a draft task under an epic — Push creates it in Jira"
+              }
               onClick={() => pick(onAddTask)}
             >
               <span className="pg-add-menu-item-label">Task</span>
-              <span className="pg-add-menu-item-meta">Draft under epic</span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="pg-add-menu-item"
-              title="Add a top-level milestone (red star) — not synced to Jira"
-              onClick={() => pick(onAddMilestone)}
-            >
-              <span className="pg-add-menu-item-label">Milestone</span>
-              <span className="pg-add-menu-item-meta">Local red star</span>
-            </button>
-            <div className="pg-add-menu-divider" role="separator" />
-            <button
-              type="button"
-              role="menuitem"
-              className="pg-add-menu-item pg-add-menu-item-qa qa-integration"
-              disabled={!hasBoardTasks}
-              title="Add an integration test bar — Push saves on linked Jira issues"
-              onClick={() => pick(onAddIntegrationTest)}
-            >
-              <span className="pg-add-menu-item-icon" aria-hidden>
-                ⊞
-              </span>
-              <span className="pg-add-menu-item-text">
-                <span className="pg-add-menu-item-label">Integration test</span>
-                <span className="pg-add-menu-item-meta">Linked Jira tasks</span>
+              <span className="pg-add-menu-item-meta">
+                {planMode ? "Under planned epic" : "Draft under epic"}
               </span>
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="pg-add-menu-item pg-add-menu-item-qa qa-e2e"
-              disabled={!hasBoardTasks}
-              title="Add an end-to-end flow bar — Push saves on linked Jira issues"
-              onClick={() => pick(onAddE2eFlow)}
-            >
-              <span className="pg-add-menu-item-icon" aria-hidden>
-                ➜
-              </span>
-              <span className="pg-add-menu-item-text">
-                <span className="pg-add-menu-item-label">E2E flow</span>
-                <span className="pg-add-menu-item-meta">Linked Jira tasks</span>
-              </span>
-            </button>
+            {!planMode ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="pg-add-menu-item"
+                  title="Add a top-level milestone (red star) — not synced to Jira"
+                  onClick={() => pick(onAddMilestone)}
+                >
+                  <span className="pg-add-menu-item-label">Milestone</span>
+                  <span className="pg-add-menu-item-meta">Local red star</span>
+                </button>
+                <div className="pg-add-menu-divider" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="pg-add-menu-item pg-add-menu-item-qa qa-integration"
+                  disabled={!hasBoardTasks}
+                  title="Add an integration test bar — Push saves on linked Jira issues"
+                  onClick={() => pick(onAddIntegrationTest)}
+                >
+                  <span className="pg-add-menu-item-icon" aria-hidden>
+                    ⊞
+                  </span>
+                  <span className="pg-add-menu-item-text">
+                    <span className="pg-add-menu-item-label">Integration test</span>
+                    <span className="pg-add-menu-item-meta">Linked Jira tasks</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="pg-add-menu-item pg-add-menu-item-qa qa-e2e"
+                  disabled={!hasBoardTasks}
+                  title="Add an end-to-end flow bar — Push saves on linked Jira issues"
+                  onClick={() => pick(onAddE2eFlow)}
+                >
+                  <span className="pg-add-menu-item-icon" aria-hidden>
+                    ➜
+                  </span>
+                  <span className="pg-add-menu-item-text">
+                    <span className="pg-add-menu-item-label">E2E flow</span>
+                    <span className="pg-add-menu-item-meta">Linked Jira tasks</span>
+                  </span>
+                </button>
+              </>
+            ) : null}
 
             <div className="pg-add-menu-divider" role="separator" />
             <div className="pg-assign-hint">Remove from timeline</div>

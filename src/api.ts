@@ -2,7 +2,12 @@ import type {
   GanttModel,
   HistoryFieldMap,
   IssueChangelog,
+  JiraPlan,
   LocalState,
+  PlanLoadResult,
+  PlanPublishResult,
+  PlanSaveResult,
+  PlanValidateResult,
   PushItem,
   PushResult,
   QaItem,
@@ -139,6 +144,51 @@ export async function deleteQaItem(
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ itemId, linkedIssueKeys }),
+    }),
+  );
+}
+
+/** Plan mode lives on a single Jira draft ticket, stored as an issue property. */
+export async function validateDraftTicket(
+  issueKey: string,
+): Promise<PlanValidateResult> {
+  return json(
+    await fetch(`/api/plan/validate?key=${encodeURIComponent(issueKey)}`),
+  );
+}
+
+export async function loadPlan(
+  draftTicketKey: string,
+  viewerEmail: string,
+): Promise<PlanLoadResult> {
+  return json(
+    await fetch("/api/plan/load", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draftTicketKey, viewerEmail }),
+    }),
+  );
+}
+
+export async function savePlan(
+  plan: JiraPlan,
+  expectedRevision?: number,
+): Promise<PlanSaveResult> {
+  return json(
+    await fetch("/api/plan/save", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan, expectedRevision }),
+    }),
+  );
+}
+
+export async function publishPlan(plan: JiraPlan): Promise<PlanPublishResult> {
+  return json(
+    await fetch("/api/plan/publish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan }),
     }),
   );
 }

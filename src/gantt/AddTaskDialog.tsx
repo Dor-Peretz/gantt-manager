@@ -5,6 +5,7 @@ interface Props {
   open: boolean;
   epics: Milestone[];
   defaultDate: string;
+  planMode?: boolean;
   onClose: () => void;
   onAdd: (input: {
     epicId: string;
@@ -18,6 +19,7 @@ export function AddTaskDialog({
   open,
   epics,
   defaultDate,
+  planMode = false,
   onClose,
   onAdd,
 }: Props) {
@@ -58,8 +60,9 @@ export function AddTaskDialog({
       >
         <h2 id="add-task-title">Add task</h2>
         <p className="pg-modal-sub">
-          Creates a draft under the selected epic. Click <strong>Push</strong> to
-          create it in Jira and write Start / Due dates.
+          {planMode
+            ? "Adds a planned task under the selected epic. Changes autosave to the draft ticket."
+            : "Creates a draft under the selected epic. Click Push to create it in Jira and write Start / Due dates."}
         </p>
         <label className="pg-modal-field">
           Epic
@@ -68,7 +71,11 @@ export function AddTaskDialog({
             onChange={(e) => setEpicId(e.target.value)}
             disabled={!epics.length}
           >
-            {!epics.length && <option value="">Pull epics first</option>}
+            {!epics.length && (
+              <option value="">
+                {planMode ? "Add an epic first" : "Pull epics first"}
+              </option>
+            )}
             {epics.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.id} — {m.title}
@@ -124,7 +131,7 @@ export function AddTaskDialog({
               onClose();
             }}
           >
-            Add draft
+            {planMode ? "Add task" : "Add draft"}
           </button>
         </div>
       </div>

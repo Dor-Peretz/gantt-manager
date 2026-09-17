@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { fetchTransitions } from "../api";
+import { useGanttStore } from "../app/useGanttStore";
 import type { StatusTransition } from "../lib/types";
 
 function statusClass(status: string): string {
@@ -61,6 +61,7 @@ export function StatusSelect({
   onChange,
   disabled = false,
 }: Props) {
+  const { store } = useGanttStore();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<MenuPos | null>(null);
   const [loading, setLoading] = useState(false);
@@ -78,7 +79,7 @@ export function StatusSelect({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void fetchTransitions(issueKey)
+    void store.getTransitions(issueKey)
       .then((res) => {
         if (!cancelled) setTransitions(res.transitions);
       })
@@ -91,7 +92,7 @@ export function StatusSelect({
     return () => {
       cancelled = true;
     };
-  }, [open, issueKey]);
+  }, [open, issueKey, store]);
 
   useEffect(() => {
     if (!open) {

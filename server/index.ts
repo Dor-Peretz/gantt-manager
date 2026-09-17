@@ -13,18 +13,23 @@ import {
   saveQaItem,
 } from "./jira.ts";
 import { mergeState, readState, writeState } from "./state.ts";
+import { loadPlanFromDraft, publishPlan, savePlanToDraft, validateDraftTicket } from "./plan.ts";
 import {
   DEMO_BASE_URL,
   DEMO_JQL,
   demoDeleteQaItem,
   demoHealth,
+  demoLoadPlan,
+  demoPublishPlan,
   demoPull,
   demoPush,
+  demoSavePlan,
   demoSaveQaItem,
   demoTransitions,
+  demoValidateDraftTicket,
   isDemo,
 } from "./demo.ts";
-import type { LocalState, PushItem, QaItem } from "../src/lib/types.ts";
+import type { JiraPlan, LocalState, PushItem, QaItem } from "../src/lib/types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
@@ -214,6 +219,66 @@ app.delete("/api/qa", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("qa delete failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/plan/validate", async (req, res) => {
+  try {
+    const key = String(req.query.key || "").trim();
+    res.json(isDemo() ? demoValidateDraftTicket(key) : await validateDraftTicket(key));
+  } catch (err) {
+    console.error("plan validate failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/plan/load", async (req, res) => {
+  try {
+    const draftTicketKey = String(req.body?.draftTicketKey || "").trim();
+    const viewerEmail =
+      typeof req.body?.viewerEmail === "string" ? req.body.viewerEmail : undefined;
+    if (!draftTicketKey) {
+      res.status(400).json({ error: "body.draftTicketKey required" });
+      return;
+    }
+    res.json(
+      isDemo()
+        ? demoLoadPlan(draftTicketKey, viewerEmail)
+        : await loadPlanFromDraft(draftTicketKey, viewerEmail),
+    );
+  } catch (err) {
+    console.error("plan load failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.put("/api/plan/save", async (req, res) => {
+  try {
+    const plan = req.body?.plan as JiraPlan | undefined;
+    if (!plan?.draftTicketKey) {
+      res.status(400).json({ error: "body.plan with draftTicketKey required" });
+      return;
+    }
+    const expectedRevision =
+      typeof req.body?.expectedRevision === "number" ? req.body.expectedRevision : undefined;
+    res.json(isDemo() ? demoSavePlan(plan) : await savePlanToDraft(plan, expectedRevision));
+  } catch (err) {
+    console.error("plan save failed", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/api/plan/publish", async (req, res) => {
+  try {
+    const plan = req.body?.plan as JiraPlan | undefined;
+    if (!plan?.draftTicketKey) {
+      res.status(400).json({ error: "body.plan with draftTicketKey required" });
+      return;
+    }
+    res.json(isDemo() ? demoPublishPlan(plan) : await publishPlan(plan));
+  } catch (err) {
+    console.error("plan publish failed", err);
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

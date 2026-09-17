@@ -1,4 +1,10 @@
-import { DEFAULT_COLUMN_WIDTHS, normalizeColumnWidths, type LocalState } from '../lib/types';
+import {
+    DEFAULT_COLUMN_WIDTHS,
+    normalizeColumnWidths,
+    type LocalMarker,
+    type LocalState,
+} from '../lib/types';
+import { DEFAULT_WORKING_WEEKDAYS, normalizeWorkingWeekdays } from '../lib/workdays';
 
 export const DEFAULT_STATE: LocalState = {
     resources: [],
@@ -14,7 +20,10 @@ export const DEFAULT_STATE: LocalState = {
     pendingQaDeletes: [],
     projectStart: new Date().toISOString().slice(0, 10),
     showHolidays: true,
+    showPolishHolidays: false,
+    workingWeekdays: [...DEFAULT_WORKING_WEEKDAYS],
     showDeps: false,
+    showSprints: true,
     customNonWorkingDays: [],
     dayWidthPx: 28,
     leftPanelWidth: 680,
@@ -26,7 +35,28 @@ export const DEFAULT_STATE: LocalState = {
     activeSavedJqlId: null,
     milestoneColors: {},
     theme: 'light',
+    planDraftTicketKey: null,
 };
+
+function normalizeLocalMarkers(raw: LocalState['localMarkers'] | undefined): LocalMarker[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .filter(
+            (item): item is LocalMarker =>
+                !!item &&
+                typeof item.id === 'string' &&
+                typeof item.title === 'string' &&
+                typeof item.start === 'string',
+        )
+        .map((item) => ({
+            id: item.id,
+            title: item.title,
+            start: item.start,
+            linkedEpicKeys: Array.isArray(item.linkedEpicKeys)
+                ? [...new Set(item.linkedEpicKeys.filter((key) => typeof key === 'string' && key.trim()))]
+                : [],
+        }));
+}
 
 function normalizeSavedJqls(raw: Partial<LocalState> | null | undefined): LocalState['savedJqls'] {
     const list = raw?.savedJqls;
@@ -64,7 +94,7 @@ export function normalizeState(raw: Partial<LocalState> | null | undefined): Loc
         markers: raw?.markers ?? {},
         hiddenTasks: raw?.hiddenTasks ?? {},
         hiddenFolderCollapsed: raw?.hiddenFolderCollapsed !== false,
-        localMarkers: raw?.localMarkers ?? [],
+        localMarkers: normalizeLocalMarkers(raw?.localMarkers),
         draftTasks: raw?.draftTasks ?? [],
         pendingQaDeletes: raw?.pendingQaDeletes ?? [],
         milestoneColors: raw?.milestoneColors ?? {},
@@ -73,7 +103,10 @@ export function normalizeState(raw: Partial<LocalState> | null | undefined): Loc
         activeSavedJqlId: activeId,
         projectStart: raw?.projectStart || DEFAULT_STATE.projectStart,
         showHolidays: raw?.showHolidays !== false,
+        showPolishHolidays: raw?.showPolishHolidays === true,
+        workingWeekdays: normalizeWorkingWeekdays(raw?.workingWeekdays),
         showDeps: raw?.showDeps === true,
+        showSprints: raw?.showSprints !== false,
         customNonWorkingDays: raw?.customNonWorkingDays ?? [],
         dayWidthPx: raw?.dayWidthPx || 28,
         leftPanelWidth: raw?.leftPanelWidth || 680,
@@ -81,5 +114,9 @@ export function normalizeState(raw: Partial<LocalState> | null | undefined): Loc
         resourcesDockHeight: raw?.resourcesDockHeight || 220,
         resourcesDockCollapsed: raw?.resourcesDockCollapsed === true,
         theme: raw?.theme === 'dark' ? 'dark' : 'light',
+        planDraftTicketKey:
+            typeof raw?.planDraftTicketKey === 'string' && raw.planDraftTicketKey.trim()
+                ? raw.planDraftTicketKey.trim()
+                : null,
     };
 }

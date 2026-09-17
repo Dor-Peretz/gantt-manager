@@ -1,3 +1,5 @@
+import { APP_VERSION } from "../app/version";
+
 /** App mark: staggered timeline bars in a rounded tile. */
 export function BrandMark({ className = "" }: { className?: string }) {
   return (
@@ -30,6 +32,7 @@ export function BrandLockup() {
       <BrandMark className="brand-mark" />
       <span className="brand-text">
         <span className="brand-name">Gantt Manager</span>
+        <span className="brand-version">v{APP_VERSION}</span>
         <span className="brand-tag">Plan timelines · sync with Jira</span>
       </span>
     </a>
